@@ -1,0 +1,152 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: altese-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: altese
+      POSTGRES_PASSWORD: altese123
+      POSTGRES_DB: altese_autopecas
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Caminho ajustado para ser relativo à pasta docker/
+      - ../../core/shared/database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - altese-network
+    healthcheck:
+      # Usa explicitamente o database altese_autopecas para evitar o erro
+      # "database \"altese\" does not exist" nos logs.
+      test: ["CMD-SHELL", "pg_isready -U altese -d altese_autopecas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache and Pub/Sub
+  redis:
+    image: redis:7-alpine
+    container_name: altese-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - altese-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # RabbitMQ Message Queue
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: altese-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: altese
+      RABBITMQ_DEFAULT_PASS: altese123
+      RABBITMQ_DEFAULT_VHOST: /
+    ports:
+      - "5672:5672"   # AMQP protocol
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - altese-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # MinIO S3-compatible Storage
+  minio:
+    image: minio/minio:latest
+    container_name: altese-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: altese
+      MINIO_ROOT_PASSWORD: altese123
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console UI
+    volumes:
+      - minio_data:/data
+    networks:
+      - altese-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # MinIO Client - Create buckets on startup
+  minio-init:
+    image: minio/mc:latest
+    container_name: altese-minio-init
+    restart: "no"  # Não reiniciar - é um container de inicialização única
+    depends_on:
+      minio:
+        condition: service_healthy  # Aguardar MinIO estar saudável
+    networks:
+      - altese-network
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Aguardando MinIO estar pronto...';
+      sleep 15;
+      echo 'Configurando MinIO client...';
+      /usr/bin/mc alias set altese http://minio:9000 altese altese123 || exit 1;
+      echo 'Criando buckets...';
+      /usr/bin/mc mb --ignore-existing altese/attachments || exit 1;
+      /usr/bin/mc mb --ignore-existing altese/media || exit 1;
+      echo 'Configurando permissões...';
+      /usr/bin/mc anonymous set download altese/attachments || exit 1;
+      /usr/bin/mc anonymous set download altese/media || exit 1;
+      echo 'Inicialização concluída com sucesso!';
+      exit 0;
+      "
+
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: altese-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"  # HTTP API
+      - "6334:6334"  # gRPC API
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - altese-network
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f qdrant || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+# Volumes for data persistence
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  rabbitmq_data:
+    driver: local
+  minio_data:
+    driver: local
+  qdrant_data:
+    driver: local
+
+# Network for inter-service communication
+networks:
+  altese-network:
+    driver: bridge
+

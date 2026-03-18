@@ -1,0 +1,27 @@
+# Fonte: config/.github/workflows/update-staging.yml
+# Cópia na raiz: .github/workflows/update-staging.yml
+#
+# Deploy automático para staging em push na branch staging.
+
+name: Update Staging
+
+on:
+  push:
+    branches: [staging]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to staging
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            cd /home/ec2-user/altese || cd ~/altese || exit 1
+            git pull origin staging
+            aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+            docker compose -f config/server/dependencies/docker-compose.yml --env-file config/server/credentials/.env/backend.env --env-file config/server/credentials/.env/ai-worker.env pull
+            docker compose -f config/server/dependencies/docker-compose.yml --env-file config/server/credentials/.env/backend.env --env-file config/server/credentials/.env/ai-worker.env up -d

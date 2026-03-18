@@ -1,0 +1,162 @@
+# Production compose for EC2: app, ai-worker, whatsapp-service, qdrant.
+# Postgres, Redis, RabbitMQ, MinIO are external (RDS, ElastiCache, SQS, S3).
+#
+# Uso (a partir da raiz do projeto):
+#   export ECR_REGISTRY=123456789012.dkr.ecr.us-east-1.amazonaws.com
+#   export ECR_REGISTRY=...
+#   docker compose -f config/server/dependencies/docker-compose.yml \
+#     --env-file config/server/credentials/.env/backend.env \
+#     --env-file config/server/credentials/.env/ai-worker.env up -d
+#
+# Cada serviço usa seu próprio env_file (separado):
+#   config/server/credentials/.env/backend.env
+#   config/server/credentials/.env/ai-worker.env
+#   config/server/credentials/.env/whatsapp-service.env
+
+services:
+  app:
+    image: ${ECR_REGISTRY}/altese-app:latest
+    container_name: altese-app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      APP_PORT: 3000
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_SYNC: "false"
+      DB_SSL: ${DB_SSL:-true}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      USE_AWS_QUEUE: "true"
+      USE_AWS_STORAGE: "true"
+      AWS_REGION: ${AWS_REGION}
+      SQS_QUEUE_AI_MESSAGES_URL: ${SQS_QUEUE_AI_MESSAGES_URL}
+      SQS_QUEUE_AI_RESPONSES_URL: ${SQS_QUEUE_AI_RESPONSES_URL}
+      SQS_QUEUE_FUNCTION_CALL_PROCESS_URL: ${SQS_QUEUE_FUNCTION_CALL_PROCESS_URL}
+      SQS_QUEUE_FUNCTION_CALL_RESPONSE_URL: ${SQS_QUEUE_FUNCTION_CALL_RESPONSE_URL}
+      S3_BUCKET_MEDIA: ${S3_BUCKET_MEDIA}
+      S3_BUCKET_ATTACHMENTS: ${S3_BUCKET_ATTACHMENTS}
+      JWT_SECRET: ${JWT_SECRET}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASS: guest
+      RABBITMQ_VHOST: /
+      MINIO_ENDPOINT: localhost
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
+      MINIO_ACCESS_KEY: minio
+      MINIO_SECRET_KEY: minio123
+    ports:
+      - "3000:3000"
+    networks:
+      - altese-network
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode===200?0:1))\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 30s
+    env_file:
+      - ../credentials/backend.env
+
+  ai-worker:
+    image: ${ECR_REGISTRY}/altese-ai-worker:latest
+    container_name: altese-ai-worker
+    restart: unless-stopped
+    environment:
+      USE_SQS: "true"
+      SQS_QUEUE_AI_MESSAGES_URL: ${SQS_QUEUE_AI_MESSAGES_URL}
+      SQS_QUEUE_AI_RESPONSES_URL: ${SQS_QUEUE_AI_RESPONSES_URL}
+      SQS_QUEUE_FUNCTION_CALL_PROCESS_URL: ${SQS_QUEUE_FUNCTION_CALL_PROCESS_URL}
+      SQS_QUEUE_FUNCTION_CALL_RESPONSE_URL: ${SQS_QUEUE_FUNCTION_CALL_RESPONSE_URL}
+      AWS_REGION: ${AWS_REGION}
+      POSTGRES_URL: ${POSTGRES_URL}
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      NODE_API_URL: http://app:3000
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      LOG_LEVEL: INFO
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - altese-network
+    env_file:
+      - ../credentials/ai-worker.env
+
+  whatsapp-service:
+    image: ${ECR_REGISTRY}/altese-whatsapp:latest
+    container_name: altese-whatsapp-service
+    restart: unless-stopped
+    environment:
+      BACKEND_WEBHOOK_URL: http://app:3000/api/whatsapp/webhook
+      ENV: production
+    ports:
+      - "5000:5000"
+    networks:
+      - altese-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    env_file:
+      - ../credentials/whatsapp-service.env
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: altese-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - altese-network
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f qdrant || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  frontend:
+    image: ${ECR_REGISTRY}/altese-frontend:latest
+    container_name: altese-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - altese-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 20s
+
+volumes:
+  qdrant_data:
+    driver: local
+
+networks:
+  altese-network:
+    driver: bridge

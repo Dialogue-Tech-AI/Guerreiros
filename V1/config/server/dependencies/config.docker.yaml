@@ -1,0 +1,38 @@
+# Config do Cloudflare Tunnel para uso dentro do Docker
+# Usa credenciais montadas em /etc/cloudflared/credentials.json
+# Aponta para http://frontend:80 (Nginx que faz proxy para /api e Socket.IO)
+
+tunnel: f47e3aa9-65ab-492c-9e56-66cfb4f2d4f9
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: alteseai.dialoguetech.com.br
+    service: http://frontend:80
+    originRequest:
+      http2Origin: false
+      noTLSVerify: true
+      connectTimeout: 30s
+      tlsTimeout: 10s
+      tcpKeepAlive: 30s
+      keepAliveTimeout: 90s
+      keepAliveConnections: 100
+      httpHostHeader: alteseai.dialoguetech.com.br
+      disableChunkedEncoding: false
+
+  - hostname: alteseai-app.dialoguetech.com.br
+    service: http://frontend:80
+    originRequest:
+      http2Origin: false
+      noTLSVerify: true
+      connectTimeout: 30s
+      tlsTimeout: 10s
+      tcpKeepAlive: 30s
+      keepAliveTimeout: 90s
+      keepAliveConnections: 100
+      httpHostHeader: alteseai-app.dialoguetech.com.br
+      disableChunkedEncoding: false
+
+  - service: http_status:404
+
+no-autoupdate: false
+protocol: auto

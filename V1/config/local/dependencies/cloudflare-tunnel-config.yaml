@@ -1,0 +1,18 @@
+# Cloudflare Tunnel - Desenvolvimento
+# Subdomínios: devaltese.dialoguetech.com.br (backend), devaltese-app.dialoguetech.com.br (frontend)
+# Produção usa alteseai.dialoguetech.com.br apontando para EC2 (IP elástico)
+tunnel: 6eee3d06-7eaf-4a6c-a109-7e03f754e190
+credentials-file: C:\Users\bield\.cloudflared\6eee3d06-7eaf-4a6c-a109-7e03f754e190.json
+
+protocol: http2
+edge-ip-version: "4"
+no-autoupdate: true
+
+ingress:
+  - hostname: devaltese-app.dialoguetech.com.br
+    service: http://localhost:5173
+  - hostname: devaltese.dialoguetech.com.br
+    service: http://localhost:3000
+  - service: http_status:404
+
+loglevel: info
