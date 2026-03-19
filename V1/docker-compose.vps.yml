@@ -120,7 +120,7 @@ services:
   db-init:
     build:
       context: ./core
-      dockerfile: ./config/dockerfiles/db-init.Dockerfile
+      dockerfile: ../config/dockerfiles/db-init.Dockerfile
     container_name: guerreiros-db-init
     restart: "no"
     env_file:
@@ -139,7 +139,7 @@ services:
   app:
     build:
       context: ./core/services/backend
-      dockerfile: ./config/dockerfiles/backend.Dockerfile
+      dockerfile: ../../../config/dockerfiles/backend.Dockerfile
     container_name: guerreiros-app
     restart: unless-stopped
     env_file:
@@ -166,7 +166,7 @@ services:
   ai-worker:
     build:
       context: ./core/services/ai-worker
-      dockerfile: ./config/dockerfiles/ai-worker.Dockerfile
+      dockerfile: ../../../config/dockerfiles/ai-worker.Dockerfile
     container_name: guerreiros-ai-worker
     restart: unless-stopped
     env_file:
@@ -180,7 +180,7 @@ services:
   frontend:
     build:
       context: ./core/services/frontend
-      dockerfile: ./config/dockerfiles/frontend.Dockerfile
+      dockerfile: ../../../config/dockerfiles/frontend.Dockerfile
     container_name: guerreiros-frontend
     restart: unless-stopped
     ports:
