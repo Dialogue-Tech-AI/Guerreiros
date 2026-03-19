@@ -25,9 +25,18 @@ Compose unificado para subir a Plataforma Guerreiros na VPS com todas as depend√
 
 ## Deploy
 
+**Importante:** Execute sempre da pasta `V1` (onde estao `config/` e `core/`).
+
 ```bash
-# Na raiz do projeto (Guerreiros/V1)
-docker compose -f config/vps/docker-compose.vps.yml up -d --build
+cd ~/Guerreiros/V1
+docker compose -f docker-compose.vps.yml up -d --build
+```
+
+Ou use o script:
+```bash
+cd ~/Guerreiros/V1
+chmod +x deploy-vps.sh
+./deploy-vps.sh
 ```
 
 Migrations e seed rodam automaticamente via o servico `db-init` antes do app subir.
