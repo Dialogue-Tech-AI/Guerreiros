@@ -7,9 +7,7 @@
 # Uso:
 #   docker compose -f config/vps/docker-compose.vps.yml up -d --build
 #
-# Primeira vez (migrations + seed):
-#   docker compose -f config/vps/docker-compose.vps.yml exec app npm run migration:run
-#   docker compose -f config/vps/docker-compose.vps.yml exec app npm run seed:run
+# Migrations e seed rodam automaticamente via servico db-init antes do app.
 # ============================================================
 
 services:
@@ -128,6 +126,27 @@ services:
       retries: 5
       start_period: 40s
 
+  # ==================== DB INIT (migrations + seed) ====================
+
+  db-init:
+    build:
+      context: ../../core
+      dockerfile: ../../../config/dockerfiles/db-init.Dockerfile
+    container_name: guerreiros-db-init
+    restart: "no"
+    env_file:
+      - ./credentials/backend.vps.env
+    environment:
+      DB_HOST_DEV: postgres
+      REDIS_HOST_DEV: redis
+      RABBITMQ_HOST_DEV: rabbitmq
+      MINIO_ENDPOINT_DEV: minio
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - guerreiros-network
+
   # ==================== APLICACAO ====================
 
   app:
@@ -139,6 +158,8 @@ services:
     env_file:
       - ./credentials/backend.vps.env
     depends_on:
+      db-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
