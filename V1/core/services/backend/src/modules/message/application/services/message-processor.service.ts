@@ -755,12 +755,17 @@ export class MessageProcessorService {
       }
 
       // Process message with buffer if attendance is handled by AI and not closed operationally
-      const shouldProcess = attendance.handledBy === AttendanceType.AI && 
-                           attendance.operationalState !== OperationalState.FECHADO_OPERACIONAL;
+      const aiBlockedUntil = attendance.aiDisabledUntil ? new Date(attendance.aiDisabledUntil) : null;
+      const isAiTemporarilyBlocked = !!(aiBlockedUntil && aiBlockedUntil.getTime() > Date.now());
+      const shouldProcess = attendance.handledBy === AttendanceType.AI &&
+                           attendance.operationalState !== OperationalState.FECHADO_OPERACIONAL &&
+                           !isAiTemporarilyBlocked;
       
       logger.info('Checking if should process message for AI', {
         attendanceId: attendance.id,
         handledBy: attendance.handledBy,
+        aiDisabledUntil: attendance.aiDisabledUntil,
+        isAiTemporarilyBlocked,
         operationalState: attendance.operationalState,
         sellerId: attendance.sellerId,
         shouldProcess,
@@ -782,6 +787,14 @@ export class MessageProcessorService {
           logger.info('⏸️ Attendance is closed - skipping AI processing', {
             attendanceId: attendance.id,
             messageId: message.id,
+          });
+          return;
+        }
+        if (isAiTemporarilyBlocked) {
+          logger.info('⏸️ AI temporarily disabled for this attendance - skipping AI processing', {
+            attendanceId: attendance.id,
+            messageId: message.id,
+            aiDisabledUntil: aiBlockedUntil?.toISOString(),
           });
           return;
         }

@@ -7,6 +7,7 @@ import { invalidateSubdivisionCountsCache } from '../../../attendance/presentati
 import type { FunctionCallProcessorHandler } from '../../domain/interfaces/function-call-processor.interface';
 
 const INTERVENTION_TYPE = 'outros-assuntos';
+const AI_DISABLED_HOURS_AFTER_ROUTING = 24;
 
 function parseResult(resultRaw: string): Record<string, unknown> {
   try {
@@ -52,6 +53,7 @@ export function createAlocaOutrosAssuntosProcessor(): FunctionCallProcessorHandl
         {
           interventionType: INTERVENTION_TYPE,
           interventionData,
+          aiDisabledUntil: new Date(Date.now() + AI_DISABLED_HOURS_AFTER_ROUTING * 60 * 60 * 1000),
         } as any
       );
 

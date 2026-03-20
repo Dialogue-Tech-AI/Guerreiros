@@ -303,8 +303,10 @@ export class AIInternalController {
 
       // NOW process audio/image for AI (fire-and-forget)
       const needsProcessing = mediaType === 'audio' || mediaType === 'image';
+      const aiDisabledByManual = attendance.aiDisabledUntil && new Date(attendance.aiDisabledUntil) > new Date();
       const shouldProcessForAI = attendance.handledBy === AttendanceType.AI &&
-                                 attendance.operationalState !== OperationalState.FECHADO_OPERACIONAL;
+                                 attendance.operationalState !== OperationalState.FECHADO_OPERACIONAL &&
+                                 !aiDisabledByManual;
 
       if (needsProcessing && shouldProcessForAI) {
         logger.info('🎯 Media is now available - starting AI processing', {

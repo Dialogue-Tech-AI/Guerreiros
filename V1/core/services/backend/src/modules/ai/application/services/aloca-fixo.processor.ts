@@ -8,6 +8,7 @@ import type { FunctionCallProcessorHandler } from '../../domain/interfaces/funct
 
 const FC_NAME = 'alocafixo';
 const INTERVENTION_TYPE = 'demanda-telefone-fixo';
+const AI_DISABLED_HOURS_AFTER_ROUTING = 24;
 
 function parseResult(resultRaw: string): Record<string, unknown> {
   try {
@@ -56,6 +57,7 @@ export function createAlocaFixoProcessor(): FunctionCallProcessorHandler {
       const updateData: any = {
         interventionType: INTERVENTION_TYPE,
         interventionData,
+        aiDisabledUntil: new Date(Date.now() + AI_DISABLED_HOURS_AFTER_ROUTING * 60 * 60 * 1000),
       };
 
       // Se o attendance estiver fechado, não fazer nada (não deve aparecer em não atribuídos/intervenção)
