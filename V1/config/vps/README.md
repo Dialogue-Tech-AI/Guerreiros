@@ -43,4 +43,6 @@ Migrations e seed rodam automaticamente via o servico `db-init` antes do app sub
 
 ## Cloudflare
 
-Configure o DNS A record apontando para o IP da VPS (porta 80) e ative o proxy (nuvem laranja) para SSL automático.
+1. Configure o DNS A record apontando para o IP da VPS
+2. Ative o proxy (nuvem laranja) para SSL automático
+3. **SSL/TLS**: use modo **Flexible** (Cloudflare→origem em HTTP, porta 80)
