@@ -27,15 +27,19 @@ Compose unificado para subir a Plataforma Guerreiros na VPS com todas as depend�
 
 **Importante:** Execute sempre da pasta `V1` (onde estao `config/` e `core/`).
 
+### Atualizar e subir
 ```bash
 cd ~/Guerreiros/V1
+git pull origin master
+docker compose -f docker-compose.vps.yml down --remove-orphans
+for c in guerreiros-minio-init guerreiros-db-init; do docker rm -f $c 2>/dev/null || true; done
 docker compose -f docker-compose.vps.yml up -d --build
 ```
 
 Ou use o script:
 ```bash
 cd ~/Guerreiros/V1
-chmod +x config/vps/deploy-vps.sh
+git pull origin master
 bash config/vps/deploy-vps.sh
 ```
 
@@ -45,7 +49,4 @@ Migrations e seed rodam automaticamente via o servico `db-init` antes do app sub
 
 1. Configure o DNS A record apontando para o IP da VPS
 2. Ative o proxy (nuvem laranja) para SSL automático
-3. **SSL/TLS**: para **Full** ou **Full (Strict)**, configure certificado de origem:
-   - Cloudflare Dashboard → SSL/TLS → Origin Server → Create Certificate
-   - Salve `origin.pem` e `origin.key` em `config/vps/ssl/`
-   - Reinicie o frontend: `docker compose -f docker-compose.vps.yml up -d frontend`
+3. **SSL/TLS**: para **Full** ou **Full (Strict)**, configure certificado de origem. **Obrigatório** - veja `config/vps/ssl/README.md` para instruções detalhadas.
