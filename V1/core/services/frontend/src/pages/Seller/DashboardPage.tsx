@@ -2945,12 +2945,15 @@ export const SellerDashboard: React.FC = () => {
                       return hasContent || hasMedia;
                     });
                     // Para mensagens do CLIENTE: mesmo conteúdo = mesma mensagem. Manter uma só, preferindo a que tem push name.
+                    // EXCEÇÃO: mensagens com mídia (áudio, imagem, vídeo, documento) são únicas - não dedupe por conteúdo (múltiplos áudios/imagens = mensagens distintas)
                     const hasRealSender = (m: any) => m.sender && String(m.sender).trim() !== '' && String(m.sender).toLowerCase() !== 'cliente';
                     const clientContentToLatest = new Map<string, { msg: any; ts: number; hasName: boolean }>();
                     const nonClient: any[] = [];
+                    const isMediaMessage = (m: any) => !!(m.metadata?.mediaUrl) || ['image', 'audio', 'video', 'document'].includes(m.metadata?.mediaType || '');
                     for (const msg of sortedNoGhost) {
                       const content = (msg.content ?? '').trim();
-                      if (msg.isClient && content) {
+                      const hasMedia = isMediaMessage(msg);
+                      if (msg.isClient && content && !hasMedia) {
                         const ts = getTs(msg);
                         const hasName = hasRealSender(msg);
                         const existing = clientContentToLatest.get(content);
@@ -2959,6 +2962,8 @@ export const SellerDashboard: React.FC = () => {
                           (hasName && !existing.hasName) ||
                           (hasName === existing.hasName && ts > existing.ts);
                         if (keepThis) clientContentToLatest.set(content, { msg, ts, hasName });
+                      } else if (msg.isClient && hasMedia) {
+                        nonClient.push(msg);
                       } else {
                         nonClient.push(msg);
                       }

@@ -6385,12 +6385,15 @@ export const SupervisorDashboard: React.FC = () => {
                       return hasContent || hasMedia;
                     });
                     // 3) Para mensagens do CLIENTE: mesmo conteúdo = mesma mensagem. Manter uma só, preferindo a que tem push name (ex.: "Marcos Alves") em vez de genérico "Cliente".
+                    // EXCEÇÃO: mensagens com mídia (áudio, imagem, vídeo, documento) são únicas - não dedupe por conteúdo (múltiplos áudios/imagens = mensagens distintas)
                     const clientContentToLatest = new Map<string, { msg: any; ts: number; hasName: boolean }>();
                     const nonClient: any[] = [];
                     const hasRealSender = (m: any) => m.sender && String(m.sender).trim() !== '' && String(m.sender).toLowerCase() !== 'cliente';
+                    const isMediaMessage = (m: any) => !!(m.metadata?.mediaUrl) || ['image', 'audio', 'video', 'document'].includes(m.metadata?.mediaType || '');
                     for (const msg of sortedNoGhost) {
                       const content = msg.content != null ? String(msg.content).trim() : '';
-                      if ((msg as any).isClient && content) {
+                      const hasMedia = isMediaMessage(msg);
+                      if ((msg as any).isClient && content && !hasMedia) {
                         const ts = getTs(msg);
                         const hasName = hasRealSender(msg);
                         const existing = clientContentToLatest.get(content);
@@ -6401,6 +6404,8 @@ export const SupervisorDashboard: React.FC = () => {
                         if (keepThis) {
                           clientContentToLatest.set(content, { msg, ts, hasName });
                         }
+                      } else if ((msg as any).isClient && hasMedia) {
+                        nonClient.push(msg);
                       } else {
                         nonClient.push(msg);
                       }
