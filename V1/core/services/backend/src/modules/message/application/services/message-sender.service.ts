@@ -4,6 +4,7 @@ import { Message } from '../../domain/entities/message.entity';
 import { Attendance } from '../../../attendance/domain/entities/attendance.entity';
 import { MessageStatus, UUID } from '../../../../shared/types/common.types';
 import { logger } from '../../../../shared/utils/logger';
+import { convertWebmToOgg, normalizeAudioToMp4 } from '../../../../shared/utils/audio-converter';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import { whatsappManagerService } from '../../../whatsapp/application/services/whatsapp-manager.service';
 import { mediaService } from './media.service';
@@ -296,38 +297,50 @@ export class MessageSenderService {
           caption: caption,
         });
       } else if (mediaType === 'audio') {
-        // WhatsApp may not accept audio/webm directly
-        // For voice notes, we need to use ptt: true and a compatible mimetype
-        // WhatsApp typically accepts: audio/ogg, audio/mpeg, audio/mp4, audio/wav
-        if (mimeType === 'audio/webm') {
-          logger.info('Sending audio/webm as voice note (ptt) with ogg mimetype', {
+        // Normalizar TODOS os áudios via ffmpeg - webm e mp4 do navegador podem ser fragmentados
+        // e causar "Este áudio não está mais disponível" no WhatsApp
+        let audioBuffer = mediaBuffer;
+        let finalMimeType = mimeType;
+        const inputExt = mimeType.includes('webm') ? '.webm' : mimeType.includes('mp4') || mimeType.includes('m4a') ? '.m4a' : '.ogg';
+        try {
+          logger.info('Normalizing audio for WhatsApp', {
             to,
-            originalMimeType: mimeType,
-            bufferSize: mediaBuffer.length,
+            originalMime: mimeType,
+            originalSize: mediaBuffer.length,
+            inputExt,
           });
-          // Send as voice note (ptt: true) with ogg mimetype
-          // WhatsApp will accept this as a voice note
-          sendResult = await socket.sendMessage(jid, {
-            audio: mediaBuffer,
-            mimetype: 'audio/ogg; codecs=opus', // WhatsApp accepts this for voice notes
-            ptt: true, // Push to talk (voice note) - this is important!
-          });
-        } else {
-          // For other audio formats, send as voice note if it's a short audio
-          // or as regular audio if it's longer
-          const isVoiceNote = mimeType === 'audio/ogg' || mimeType === 'audio/mp4';
-          logger.info('Sending audio', {
-            to,
-            mimeType,
-            ptt: isVoiceNote,
-            bufferSize: mediaBuffer.length,
-          });
-          sendResult = await socket.sendMessage(jid, {
-            audio: mediaBuffer,
-            mimetype: mimeType,
-            ptt: isVoiceNote, // Use ptt for voice notes
-          });
+          const { buffer, mimeType: outMime } = await normalizeAudioToMp4(mediaBuffer, inputExt);
+          audioBuffer = buffer;
+          finalMimeType = outMime;
+        } catch (convErr: any) {
+          if (mimeType === 'audio/webm' || mimeType.startsWith('audio/webm')) {
+            logger.warn('normalizeAudioToMp4 failed, trying OGG fallback', { error: convErr.message });
+            try {
+              audioBuffer = await convertWebmToOgg(mediaBuffer);
+              finalMimeType = 'audio/ogg; codecs=opus';
+            } catch (oggErr: any) {
+              logger.error('Audio normalization failed', { to, error: oggErr.message });
+              throw new Error(
+                'Áudio não pôde ser processado. Instale ffmpeg (winget install Gyan.FFmpeg no Windows) e reinicie o backend.'
+              );
+            }
+          } else {
+            logger.error('Audio normalization failed', { to, error: convErr.message });
+            throw new Error(
+              'Áudio não pôde ser processado. Instale ffmpeg (winget install Gyan.FFmpeg no Windows) e reinicie o backend.'
+            );
+          }
         }
+        logger.info('Sending normalized audio as voice note (ptt)', {
+          to,
+          mimeType: finalMimeType,
+          bufferSize: audioBuffer.length,
+        });
+        sendResult = await socket.sendMessage(jid, {
+          audio: audioBuffer,
+          mimetype: finalMimeType,
+          ptt: true,
+        });
       } else {
         sendResult = await socket.sendMessage(jid, {
           document: mediaBuffer,

@@ -4408,7 +4408,7 @@ export const SupervisorDashboard: React.FC = () => {
   const closedTreeSymbolActive = 'text-sky-600 dark:text-sky-400';
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-100 dark:bg-slate-950 flex-col md:flex-row page-load-fade">
+    <div className="flex h-[100dvh] md:h-screen overflow-hidden bg-slate-100 dark:bg-slate-950 flex-col md:flex-row page-load-fade">
       {/* Sidebar Left - Desktop only */}
       <aside
         className={`hidden md:flex ${sidebarOpen ? 'w-56' : 'w-16'} transition-all duration-300 flex-col items-center py-4 bg-navy text-white flex-shrink-0 z-20`}
@@ -5448,8 +5448,8 @@ export const SupervisorDashboard: React.FC = () => {
       </div>
       )}
 
-      {/* Main Chat Area - tab slide transitions on mobile and desktop */}
-      <main className={`flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative isolate pb-14 md:pb-0 ${activeSupervisorTab === 'chat' ? `absolute md:relative inset-0 md:inset-auto transition-[transform] duration-300 ease-out ${mobileChatLayer === 'chat' ? 'translate-x-0' : 'translate-x-full'} md:!translate-x-0 ${mobileChatLayer !== 'chat' ? 'pointer-events-none' : ''} md:pointer-events-auto` : ''}`}>
+      {/* Main Chat Area - tab slide transitions on mobile and desktop. Mobile: fixed para preencher viewport do topo. */}
+      <main className={`supervisor-main-mobile flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative isolate pb-14 md:pb-0 fixed md:relative inset-0 md:inset-auto z-40 md:z-auto ${activeSupervisorTab === 'chat' ? `transition-[transform] duration-300 ease-out ${mobileChatLayer === 'chat' ? 'translate-x-0' : 'translate-x-full'} md:!translate-x-0 ${mobileChatLayer !== 'chat' ? 'pointer-events-none' : ''} md:pointer-events-auto` : ''}`}>
         {/* Contatos section - slides na direção do indicador (vertical desktop, horizontal mobile) */}
         <div className={`absolute inset-0 w-full min-w-full md:min-w-0 flex flex-col min-h-0 supervisor-tab-panel ${getSupervisorTabSlideClass('contatos', activeSupervisorTab)} ${activeSupervisorTab !== 'contatos' ? 'pointer-events-none' : 'pointer-events-auto'}`}>
           <div className="flex-1 min-h-0 min-w-0 overflow-auto bg-slate-100 dark:bg-slate-950 p-3 sm:p-5 pb-20 md:pb-5">
@@ -5988,7 +5988,7 @@ export const SupervisorDashboard: React.FC = () => {
         </div>
 
         {/* Chat section - slides na direção do indicador (vertical desktop, horizontal mobile) */}
-        <div className={`absolute inset-0 w-full min-w-full md:min-w-0 flex flex-col min-h-0 md:flex-1 md:min-h-0 supervisor-tab-panel ${getSupervisorTabSlideClass('chat', activeSupervisorTab)} ${activeSupervisorTab !== 'chat' ? 'pointer-events-none' : 'pointer-events-auto'} bg-slate-100 dark:bg-slate-950 pb-14 md:pb-0`}>
+        <div className={`supervisor-chat-panel-mobile absolute inset-0 w-full min-w-full md:min-w-0 flex flex-col min-h-0 md:flex-1 md:min-h-0 supervisor-tab-panel ${getSupervisorTabSlideClass('chat', activeSupervisorTab)} ${activeSupervisorTab !== 'chat' ? 'pointer-events-none' : 'pointer-events-auto'} bg-slate-100 dark:bg-slate-950 pb-14 md:pb-0`}>
         {(isPedidosOrcamentosView || selectedTodasDemandasSubdivision) && selectedQuote ? (
           <>
           <div className="flex-grow overflow-y-auto p-6 custom-scrollbar min-h-0">

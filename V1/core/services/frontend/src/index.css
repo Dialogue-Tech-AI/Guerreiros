@@ -189,10 +189,16 @@
   }
 }
 
+/* Safe area para barra de navegação mobile (notch/home indicator) */
+.safe-area-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
 /* #root deve ser completamente transparente e não interferir */
 #root {
   width: 100%;
   min-height: 100vh;
+  min-height: 100dvh; /* mobile: altura dinâmica da viewport */
   margin: 0;
   padding: 0;
   background: none !important;
@@ -303,4 +309,33 @@ body > #root > div > main {
   .supervisor-tab-desktop-up { transform: translate3d(0, -100%, 0); }
   .supervisor-tab-desktop-center { transform: translate3d(0, 0, 0); }
   .supervisor-tab-desktop-down { transform: translate3d(0, 100%, 0); }
+}
+
+/* Supervisor mobile: forçar área principal e chat do topo ao rodapé (corrige conteúdo na metade da tela) */
+@media (max-width: 767px) {
+  .supervisor-main-mobile {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100% !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: flex-start !important;
+    align-items: stretch !important;
+  }
+  .supervisor-chat-panel-mobile {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: flex-start !important;
+    align-items: stretch !important;
+  }
 }

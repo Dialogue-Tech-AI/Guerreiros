@@ -30,6 +30,9 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 
+# ffmpeg para conversão de áudio WebM -> OGG (envio de áudios pela plataforma)
+RUN apk add --no-cache ffmpeg
+
 # Set environment
 ENV NODE_ENV=production
 

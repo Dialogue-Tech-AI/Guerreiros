@@ -4,39 +4,12 @@ import {
   WhatsAppMessage,
 } from '../../../domain/interfaces/whatsapp-adapter.interface';
 import { logger } from '../../../../../shared/utils/logger';
+import { convertWebmToOgg } from '../../../../../shared/utils/audio-converter';
 import axios, { AxiosError } from 'axios';
 import FormData from 'form-data';
-import * as fs from 'fs/promises';
-import * as os from 'os';
-import * as path from 'path';
-import ffmpeg from 'fluent-ffmpeg';
 import sharp from 'sharp';
 
 const GRAPH_API_BASE = 'https://graph.facebook.com/v18.0';
-
-/** WhatsApp Cloud API does not support audio/webm; convert to audio/ogg (supported). */
-async function convertWebmToOgg(webmBuffer: Buffer): Promise<Buffer> {
-  const tmpDir = os.tmpdir();
-  const inputPath = path.join(tmpDir, `meta-cloud-audio-in-${Date.now()}.webm`);
-  const outputPath = path.join(tmpDir, `meta-cloud-audio-out-${Date.now()}.ogg`);
-  try {
-    await fs.writeFile(inputPath, webmBuffer);
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg(inputPath)
-        .outputOptions(['-acodec libopus', '-b:a 64k'])
-        .format('ogg')
-        .output(outputPath)
-        .on('end', () => resolve())
-        .on('error', (err: Error) => reject(err))
-        .run();
-    });
-    const oggBuffer = await fs.readFile(outputPath);
-    return oggBuffer;
-  } finally {
-    await fs.unlink(inputPath).catch(() => {});
-    await fs.unlink(outputPath).catch(() => {});
-  }
-}
 
 export interface MetaCloudAdapterConfig {
   numberId: string;
