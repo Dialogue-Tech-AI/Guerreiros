@@ -58,7 +58,7 @@ ls -la ~/Guerreiros/V1/config/vps/ssl/
 ### 4. Reiniciar o frontend
 ```bash
 cd ~/Guerreiros/V1
-docker compose -f docker-compose.vps.yml up -d --force-recreate frontend
+docker compose -f docker-compose.vps.yml -f config/vps/compose.override.public-ports.yml up -d --force-recreate frontend
 ```
 
 ### 5. Confirmar que SSL está ativo

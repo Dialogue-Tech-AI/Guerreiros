@@ -9,7 +9,7 @@ echo "=== Deploy Plataforma Guerreiros ==="
 echo "Diretorio: $(pwd)"
 echo ""
 
-docker compose -f docker-compose.vps.yml up -d --build
+docker compose -f docker-compose.vps.yml -f config/vps/compose.override.public-ports.yml up -d --build
 
 echo ""
 echo "=== Deploy concluido ==="

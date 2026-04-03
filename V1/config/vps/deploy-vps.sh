@@ -8,6 +8,8 @@
 
 set -e
 
+COMPOSE_FILES="-f docker-compose.vps.yml -f config/vps/compose.override.public-ports.yml"
+
 # Diretório do projeto (ajuste se necessário)
 PROJECT_DIR="${GUERREIROS_DIR:-/root/Guerreiros}"
 cd "$PROJECT_DIR/V1" || { echo "Erro: pasta $PROJECT_DIR/V1 não encontrada"; exit 1; }
@@ -24,15 +26,15 @@ git pull origin master
 # Parar e remover containers (mantém volumes - dados do banco preservados)
 echo ""
 echo "=== 2. Parando e removendo containers ==="
-docker compose -f docker-compose.vps.yml down --remove-orphans
+docker compose $COMPOSE_FILES down --remove-orphans
 # Remove containers one-shot órfãos (exited mas não removidos em runs anteriores)
 for c in guerreiros-minio-init guerreiros-db-init; do docker rm -f $c 2>/dev/null || true; done
 
 # Subir tudo com rebuild - db-init roda migrations automaticamente antes do app
 echo ""
 echo "=== 3. Subindo aplicação (build + up) ==="
-docker compose -f docker-compose.vps.yml up -d --build
+docker compose $COMPOSE_FILES up -d --build
 
 echo ""
 echo "=== 4. Deploy concluído! ==="
-docker compose -f docker-compose.vps.yml ps
+docker compose $COMPOSE_FILES ps

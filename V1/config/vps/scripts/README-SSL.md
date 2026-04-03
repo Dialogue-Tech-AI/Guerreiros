@@ -46,8 +46,8 @@ cd ~/Guerreiros/V1 && CLOUDFLARE_API_TOKEN="SEU_TOKEN" CLOUDFLARE_ZONE_NAME="dia
 
 ```bash
 cd ~/Guerreiros/V1
-docker compose -f docker-compose.vps.yml down
-docker compose -f docker-compose.vps.yml up -d --build
+docker compose -f docker-compose.vps.yml -f config/vps/compose.override.public-ports.yml down
+docker compose -f docker-compose.vps.yml -f config/vps/compose.override.public-ports.yml up -d --build
 ```
 
 ## 5. Cloudflare (manual)

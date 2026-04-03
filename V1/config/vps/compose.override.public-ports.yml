@@ -1,0 +1,13 @@
+# =============================================================================
+# VPS dedicada: o container frontend publica 80 e 443 no host (nginx no Docker).
+#
+# Uso:
+#   docker compose -f docker-compose.vps.yml -f config/vps/compose.override.public-ports.yml up -d --build
+#
+# Não combine com compose.override.host-nginx.yml — use um ou outro.
+# =============================================================================
+services:
+  frontend:
+    ports:
+      - "80:80"
+      - "443:443"

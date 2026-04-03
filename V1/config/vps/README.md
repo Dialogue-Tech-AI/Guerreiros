@@ -31,9 +31,9 @@ Compose unificado para subir a Plataforma Guerreiros na VPS com todas as depend�
 ```bash
 cd ~/Guerreiros/V1
 git pull origin master
-docker compose -f docker-compose.vps.yml down --remove-orphans
+docker compose -f docker-compose.vps.yml -f config/vps/compose.override.public-ports.yml down --remove-orphans
 for c in guerreiros-minio-init guerreiros-db-init; do docker rm -f $c 2>/dev/null || true; done
-docker compose -f docker-compose.vps.yml up -d --build
+docker compose -f docker-compose.vps.yml -f config/vps/compose.override.public-ports.yml up -d --build
 ```
 
 Ou use o script:
@@ -44,6 +44,8 @@ bash config/vps/deploy-vps.sh
 ```
 
 Migrations e seed rodam automaticamente via o servico `db-init` antes do app subir.
+
+**Portas do frontend:** o `docker-compose.vps.yml` já não define `ports` no serviço `frontend`. É obrigatório usar **`compose.override.public-ports.yml`** (VPS com Docker nas portas 80/443) **ou** **`compose.override.host-nginx.yml`** (nginx no host). Não mistures os dois.
 
 ## Cloudflare
 

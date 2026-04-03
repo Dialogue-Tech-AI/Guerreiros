@@ -2,6 +2,10 @@
 # Use quando o servidor JÁ tem nginx (ou outro proxy) nos ports 80/443 e outra
 # app Docker (ex.: João em 8081). Evita conflito e permite routear por domínio.
 #
+# O docker-compose.vps.yml NÃO define ports no frontend — cada override define
+# só as portas certas. Se misturares com public-ports.yml, o Compose fundia
+# as listas e voltava a tentar bind em :80 (address already in use).
+#
 # Uso na VPS:
 #   cd ~/Guerreiros/V1
 #   docker compose -f docker-compose.vps.yml -f config/vps/compose.override.host-nginx.yml up -d --build

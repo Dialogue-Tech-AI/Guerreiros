@@ -1,7 +1,8 @@
 # ============================================================
 # Plataforma Guerreiros - VPS (Execute da pasta V1)
 # ============================================================
-# Uso: cd ~/Guerreiros/V1 && docker compose -f docker-compose.vps.yml up -d --build
+# Uso: cd ~/Guerreiros/V1 && docker compose -f docker-compose.vps.yml -f config/vps/compose.override.public-ports.yml up -d --build
+#       (ou compose.override.host-nginx.yml se 80/443 já estão no nginx do host)
 # ============================================================
 
 name: guerreiros-vps
@@ -184,9 +185,7 @@ services:
       dockerfile: ../../../config/dockerfiles/frontend.Dockerfile
     container_name: guerreiros-frontend
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
+    # ports: ver compose.override.public-ports.yml ou compose.override.host-nginx.yml
     volumes:
       - ./config/vps/ssl:/etc/nginx/ssl:ro
     depends_on:
