@@ -1196,8 +1196,10 @@ export class BaileysAdapter implements IWhatsAppAdapter {
       // Format phone number to JID format
       const jid = this.formatPhoneToJid(to);
       
-      // Send presence update: 'composing' for typing, 'available' to stop
-      await this.socket.sendPresenceUpdate(isTyping ? 'composing' : 'available', jid);
+      // Chat state: composing / paused. NUNCA usar 'available' aqui — no Baileys isso vira presença
+      // global, liga sendActiveReceipts e as mensagens passam a ser marcadas como lidas no telefone
+      // (some notificações). 'paused' = parou de digitar, sem afetar recibos.
+      await this.socket.sendPresenceUpdate(isTyping ? 'composing' : 'paused', jid);
 
       logger.debug('Typing indicator sent', {
         numberId: this.numberId,

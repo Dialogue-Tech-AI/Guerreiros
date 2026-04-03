@@ -8,6 +8,7 @@ import { convertWebmToOgg, normalizeAudioToMp4 } from '../../../../shared/utils/
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import { whatsappManagerService } from '../../../whatsapp/application/services/whatsapp-manager.service';
 import { mediaService } from './media.service';
+import { WHATSAPP_TEAM_DISPLAY_NAME } from '../../../../shared/constants/whatsapp-outgoing';
 
 /**
  * Message Sender Service
@@ -76,8 +77,12 @@ export class MessageSenderService {
         throw new Error(`WhatsApp not connected for number: ${attendance.whatsappNumberId}`);
       }
 
-      // Send message via WhatsApp: prefixo apenas para usuários (vendedores), nunca para IA
-      const nameForWhatsApp = shouldIncludeName && senderName && senderName !== 'Altese AI' ? senderName : undefined;
+      // Send message via WhatsApp: prefixo apenas para usuários (vendedores), nunca para IA.
+      // Nome exibido no WhatsApp é fixo (marca), não o nome real do usuário no banco.
+      const nameForWhatsApp =
+        shouldIncludeName && senderName && senderName !== 'Altese AI'
+          ? WHATSAPP_TEAM_DISPLAY_NAME
+          : undefined;
       await adapter.sendMessage(
         attendance.clientPhone, 
         content,
