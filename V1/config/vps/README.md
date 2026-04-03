@@ -68,4 +68,6 @@ Se **80/443 já estão no nginx do host** (e não no Docker), o serviço `fronte
 
 2. No **nginx do host**, crie um `server` por domínio: um `proxy_pass` para `127.0.0.1:8081` (João) e outro para `127.0.0.1:8082` (Fabio/Guerreiros). Veja o exemplo em `config/vps/nginx-host-multi-app.example.conf`.
 
+   Para os domínios reais **atendimento-joaoguerreiro** / **atendimento-fabioguerreiro**, pode copiar o bloco pronto em `config/vps/nginx-add-fabio-to-host.conf` (só falta alinhar `ssl_certificate` com o bloco do João).
+
 Sem isso, o domínio do Fabio pode cair no mesmo upstream do João e mostrar a UI errada.
