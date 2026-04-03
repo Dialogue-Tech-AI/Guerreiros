@@ -50,3 +50,20 @@ Migrations e seed rodam automaticamente via o servico `db-init` antes do app sub
 1. Configure o DNS A record apontando para o IP da VPS
 2. Ative o proxy (nuvem laranja) para SSL automático
 3. **SSL/TLS**: para **Full** ou **Full (Strict)**, configure certificado de origem. **Obrigatório** - veja `config/vps/ssl/README.md` para instruções detalhadas.
+
+## VPS com nginx no host e outra app (ex.: João em 8081)
+
+Se **80/443 já estão no nginx do host** (e não no Docker), o serviço `frontend` do compose **não pode** mapear `80:80` / `443:443` — o container nem subirá ou ficará em conflito.
+
+1. Suba o Guerreiros com o override de portas (frontend em **8082** no host):
+
+   ```bash
+   cd ~/Guerreiros/V1
+   docker compose -f docker-compose.vps.yml -f config/vps/compose.override.host-nginx.yml up -d --build
+   ```
+
+   Ou use `bash config/vps/deploy-vps-host-nginx.sh`.
+
+2. No **nginx do host**, crie um `server` por domínio: um `proxy_pass` para `127.0.0.1:8081` (João) e outro para `127.0.0.1:8082` (Fabio/Guerreiros). Veja o exemplo em `config/vps/nginx-host-multi-app.example.conf`.
+
+Sem isso, o domínio do Fabio pode cair no mesmo upstream do João e mostrar a UI errada.
