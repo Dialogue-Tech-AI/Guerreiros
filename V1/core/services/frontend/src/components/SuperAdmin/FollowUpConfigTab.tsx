@@ -7,6 +7,9 @@ interface FollowUpConfigTabProps {
   isLoading: boolean;
   isSaving: boolean;
   onSave: () => Promise<void>;
+  followUpEnabled: boolean;
+  isTogglingFollowUp: boolean;
+  onToggleFollowUp: (enabled: boolean) => Promise<void>;
 }
 
 export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
@@ -15,6 +18,9 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
   isLoading,
   isSaving,
   onSave,
+  followUpEnabled,
+  isTogglingFollowUp,
+  onToggleFollowUp,
 }) => {
   return (
     <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden" style={{ backgroundColor: '#FFFFFF' }}>
@@ -23,7 +29,7 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
           <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center" style={{ backgroundColor: '#FEE4E2' }}>
             <span className="material-icons-outlined text-primary" style={{ color: '#F07000' }}>schedule_send</span>
           </div>
-          <div>
+          <div className="flex-1">
             <h2 className="text-xl font-bold text-slate-900 dark:text-white" style={{ color: '#0F172A', fontWeight: 700 }}>
               Mensagens de Follow-up (Inatividade)
             </h2>
@@ -31,6 +37,62 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
               Configure os tempos e mensagens enviadas automaticamente quando o cliente fica inativo (sem responder).
             </p>
           </div>
+        </div>
+
+        {/* Botão master de ligar/desligar o follow-up */}
+        <div
+          className={`mt-4 flex items-center justify-between p-4 rounded-xl border-2 transition-all ${
+            followUpEnabled
+              ? 'border-green-400 bg-green-50'
+              : 'border-red-400 bg-red-50'
+          }`}
+          style={{ borderColor: followUpEnabled ? '#4ade80' : '#f87171', backgroundColor: followUpEnabled ? '#f0fdf4' : '#fff1f2' }}
+        >
+          <div className="flex items-center gap-3">
+            <span
+              className="material-icons-outlined text-2xl"
+              style={{ color: followUpEnabled ? '#16a34a' : '#dc2626' }}
+            >
+              {followUpEnabled ? 'notifications_active' : 'notifications_off'}
+            </span>
+            <div>
+              <p className="font-bold text-sm" style={{ color: followUpEnabled ? '#15803d' : '#b91c1c' }}>
+                {followUpEnabled ? 'Follow-up ATIVADO' : 'Follow-up DESATIVADO'}
+              </p>
+              <p className="text-xs" style={{ color: followUpEnabled ? '#166534' : '#991b1b' }}>
+                {followUpEnabled
+                  ? 'Mensagens automáticas de follow-up estão sendo enviadas normalmente.'
+                  : 'Nenhuma mensagem de follow-up será enviada. Atendimentos não serão fechados automaticamente por inatividade.'}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => onToggleFollowUp(!followUpEnabled)}
+            disabled={isTogglingFollowUp}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-sm text-white shadow transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{
+              backgroundColor: followUpEnabled ? '#dc2626' : '#16a34a',
+              minWidth: 140,
+              justifyContent: 'center',
+            }}
+          >
+            {isTogglingFollowUp ? (
+              <>
+                <span className="material-icons-outlined text-base animate-spin">refresh</span>
+                Aguarde...
+              </>
+            ) : followUpEnabled ? (
+              <>
+                <span className="material-icons-outlined text-base">power_settings_new</span>
+                Desligar Follow-up
+              </>
+            ) : (
+              <>
+                <span className="material-icons-outlined text-base">power_settings_new</span>
+                Ligar Follow-up
+              </>
+            )}
+          </button>
         </div>
       </div>
 

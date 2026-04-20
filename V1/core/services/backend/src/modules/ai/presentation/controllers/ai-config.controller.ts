@@ -88,6 +88,10 @@ export class AIConfigController {
     this.router.get('/subdivision-inactivity-timeouts', this.getSubdivisionInactivityTimeouts.bind(this));
     this.router.put('/subdivision-inactivity-timeouts', this.updateSubdivisionInactivityTimeouts.bind(this));
 
+    // Follow-up global on/off switch
+    this.router.get('/follow-up-enabled', this.getFollowUpEnabled.bind(this));
+    this.router.put('/follow-up-enabled', this.updateFollowUpEnabled.bind(this));
+
     // Follow-up configuration (times and messages for inactive attendances)
     this.router.get('/follow-up-config', this.getFollowUpConfig.bind(this));
     this.router.put('/follow-up-config', this.updateFollowUpConfig.bind(this));
@@ -1494,6 +1498,44 @@ export class AIConfigController {
         success: false,
         error: error.message || 'Erro ao atualizar tempos de inatividade por subdivisão',
       });
+    }
+  }
+
+  /**
+   * GET /ai/config/follow-up-enabled
+   */
+  private async getFollowUpEnabled(req: Request, res: Response): Promise<void> {
+    try {
+      const enabled = await aiConfigService.getFollowUpEnabled();
+      res.json({ success: true, data: { enabled } });
+    } catch (error: any) {
+      logger.error('Error in getFollowUpEnabled', { error: error.message });
+      res.status(500).json({ success: false, error: 'Erro ao buscar estado do follow-up' });
+    }
+  }
+
+  /**
+   * PUT /ai/config/follow-up-enabled
+   * Body: { enabled: boolean }
+   */
+  private async updateFollowUpEnabled(req: Request, res: Response): Promise<void> {
+    try {
+      const { enabled } = req.body;
+      if (typeof enabled !== 'boolean') {
+        res.status(400).json({ success: false, error: 'enabled deve ser um booleano' });
+        return;
+      }
+      const updated = await aiConfigService.updateFollowUpEnabled(enabled);
+      res.json({
+        success: true,
+        data: { enabled: updated.enabled, updatedAt: updated.updatedAt },
+        message: enabled
+          ? 'Follow-up automático ATIVADO.'
+          : 'Follow-up automático DESATIVADO. Nenhuma mensagem de follow-up será enviada.',
+      });
+    } catch (error: any) {
+      logger.error('Error in updateFollowUpEnabled', { error: error.message });
+      res.status(500).json({ success: false, error: 'Erro ao atualizar estado do follow-up' });
     }
   }
 

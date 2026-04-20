@@ -1116,6 +1116,56 @@ Responda em português brasileiro de forma clara e objetiva.`;
     }
   }
 
+  /**
+   * Get follow-up global enabled flag.
+   * Default: true (feature enabled).
+   */
+  async getFollowUpEnabled(): Promise<boolean> {
+    try {
+      const config = await this.configRepository.findOne({
+        where: { key: 'follow_up_enabled' },
+      });
+      if (!config || !config.value || config.value.trim() === '') return true;
+      const v = config.value.trim().toLowerCase();
+      return v !== 'false' && v !== '0' && v !== 'no';
+    } catch (error: any) {
+      logger.error('Error getting follow_up_enabled', { error: error.message });
+      return true;
+    }
+  }
+
+  /**
+   * Update follow-up global enabled flag.
+   */
+  async updateFollowUpEnabled(enabled: boolean): Promise<{ enabled: boolean; updatedAt: Date }> {
+    try {
+      let config = await this.configRepository.findOne({
+        where: { key: 'follow_up_enabled' },
+      });
+      const value = enabled ? 'true' : 'false';
+      if (!config) {
+        config = this.configRepository.create({
+          key: 'follow_up_enabled',
+          value,
+          metadata: {
+            version: '1.0',
+            description: 'Liga/desliga completamente o sistema de follow-up automático',
+            updatedAt: new Date().toISOString(),
+          },
+        });
+      } else {
+        config.value = value;
+        config.metadata = { ...(config.metadata || {}), updatedAt: new Date().toISOString() };
+      }
+      const saved = await this.configRepository.save(config);
+      logger.info('follow_up_enabled updated', { enabled, updatedAt: saved.updatedAt });
+      return { enabled, updatedAt: saved.updatedAt };
+    } catch (error: any) {
+      logger.error('Error updating follow_up_enabled', { error: error.message });
+      throw error;
+    }
+  }
+
   async updateAutoReopenTimeout(timeoutMinutes: number): Promise<{ timeoutMinutes: number; updatedAt: Date }> {
     try {
       const clamped = Math.max(1, Math.min(480, timeoutMinutes)); // Clamp between 1 and 480 minutes

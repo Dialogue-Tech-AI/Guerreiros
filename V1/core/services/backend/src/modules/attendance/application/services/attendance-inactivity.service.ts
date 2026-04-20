@@ -24,6 +24,11 @@ export class AttendanceInactivityService {
    */
   async checkAndCloseInactiveAttendances(): Promise<number> {
     try {
+      const followUpEnabled = await aiConfigService.getFollowUpEnabled();
+      if (!followUpEnabled) {
+        return 0;
+      }
+
       const attendanceRepo = AppDataSource.getRepository(Attendance);
       const messageRepo = AppDataSource.getRepository(Message);
 

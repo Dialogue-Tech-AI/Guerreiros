@@ -649,5 +649,21 @@ AIConfigService.prototype.updateOpenAIModel = async function(model: string): Pro
   return response.data.data;
 };
 
+/**
+ * Follow-up global on/off switch
+ */
+AIConfigService.prototype.getFollowUpEnabled = async function(): Promise<boolean> {
+  const response = await api.get<{ success: boolean; data: { enabled: boolean } }>('/ai/config/follow-up-enabled');
+  return response.data.data.enabled;
+};
+
+AIConfigService.prototype.updateFollowUpEnabled = async function(enabled: boolean): Promise<{ enabled: boolean; updatedAt: Date }> {
+  const response = await api.put<{ success: boolean; data: { enabled: boolean; updatedAt: Date } }>(
+    '/ai/config/follow-up-enabled',
+    { enabled }
+  );
+  return response.data.data;
+};
+
 export const functionCallConfigService = new FunctionCallConfigService();
 export const aiConfigService = new AIConfigService();

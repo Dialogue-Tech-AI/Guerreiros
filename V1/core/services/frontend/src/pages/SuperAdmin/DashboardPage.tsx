@@ -505,6 +505,10 @@ export const SuperAdminDashboard: React.FC = () => {
   const [isLoadingSubdivisionTimeouts, setIsLoadingSubdivisionTimeouts] = useState(false);
   const [isSavingSubdivisionTimeouts, setIsSavingSubdivisionTimeouts] = useState(false);
 
+  // Follow-up global switch
+  const [followUpEnabled, setFollowUpEnabled] = useState(true);
+  const [isTogglingFollowUp, setIsTogglingFollowUp] = useState(false);
+
   // Follow-up config states (tempos e mensagens de follow-up por inatividade)
   const [followUpConfig, setFollowUpConfig] = useState<FollowUpConfig>({
     firstDelayMinutes: 60,
@@ -1314,6 +1318,14 @@ export const SuperAdminDashboard: React.FC = () => {
           setIsLoadingAutoReopen(false);
         }
       };
+      const loadFollowUpEnabled = async () => {
+        try {
+          const enabled = await (aiConfigService as any).getFollowUpEnabled();
+          setFollowUpEnabled(enabled);
+        } catch (error: any) {
+          console.error('Error loading follow-up enabled:', error);
+        }
+      };
       const loadFollowUpConfig = async () => {
         setIsLoadingFollowUp(true);
         try {
@@ -1340,6 +1352,7 @@ export const SuperAdminDashboard: React.FC = () => {
       };
       loadSubdivisionInactivityTimeouts();
       loadAutoReopenConfig();
+      loadFollowUpEnabled();
       loadFollowUpConfig();
       loadFollowUpMovementConfig();
     }
@@ -1605,6 +1618,24 @@ export const SuperAdminDashboard: React.FC = () => {
       toast.error(error.response?.data?.error || 'Erro ao atualizar tempos de inatividade por subdivisão');
     } finally {
       setIsSavingSubdivisionTimeouts(false);
+    }
+  };
+
+  const handleToggleFollowUp = async (enabled: boolean) => {
+    setIsTogglingFollowUp(true);
+    try {
+      await (aiConfigService as any).updateFollowUpEnabled(enabled);
+      setFollowUpEnabled(enabled);
+      toast.success(
+        enabled
+          ? 'Follow-up automático ATIVADO com sucesso.'
+          : 'Follow-up automático DESATIVADO. Nenhuma mensagem será enviada.'
+      );
+    } catch (error: any) {
+      console.error('Error toggling follow-up:', error);
+      toast.error(error.response?.data?.error || 'Erro ao alterar estado do follow-up');
+    } finally {
+      setIsTogglingFollowUp(false);
     }
   };
 
@@ -4949,6 +4980,9 @@ export const SuperAdminDashboard: React.FC = () => {
                         isLoading={isLoadingFollowUp}
                         isSaving={isSavingFollowUp}
                         onSave={handleSaveFollowUpConfig}
+                        followUpEnabled={followUpEnabled}
+                        isTogglingFollowUp={isTogglingFollowUp}
+                        onToggleFollowUp={handleToggleFollowUp}
                       />
 
                       {/* Row 5: Follow-up Movement Config (movimentação entre divisões) */}
