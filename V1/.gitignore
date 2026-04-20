@@ -21,9 +21,7 @@ build/
 .env.production
 .env.ec2
 config/local/credentials/.env
-config/local/credentials/.env
-config/local/credentials/.env
-config/local/credentials/.env
+config/local/credentials/*.zip
 config/server/credentials/.env
 config/server/credentials/.env
 config/server/credentials/.env
