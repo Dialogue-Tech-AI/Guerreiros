@@ -31,10 +31,25 @@ export interface Conversation {
   attributionSource?: AttributionSource;
   /** Em "Não atribuídos" > Todos: origem para badge (triagem | encaminhados-ecommerce | encaminhados-balcao) */
   unassignedSource?: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao';
+  /** Atalho da sidebar personalizada (fila virtual) — vem do aiContext no backend */
+  supervisorCustomSidebarNodeId?: string;
   /** Subdivisão do vendedor (pedidos-orcamentos, perguntas-pos-orcamento, etc.) */
   sellerSubdivision?: string;
   /** Fase do follow-up (Aguardando 1º Follow up, Aguardando 2º Follow up, Aguardando) */
   followUpPhase?: string;
+}
+
+/** Candidato à lista de follow-up manual (aba Supervisor). */
+export interface ManualFollowUpCandidateDto {
+  attendanceId: string;
+  clientPhone: string;
+  clientName: string;
+  lastClientMessageAt: string;
+  inactiveMinutes: number;
+  firstSentAt: string | null;
+  secondSentAt: string | null;
+  suggestedPhase: 1 | 2 | null;
+  messagePreview: string;
 }
 
 export interface ContactHistoryMessage {
@@ -125,7 +140,7 @@ export const attendanceService = {
   /**
    * Get active attendance counts per subdivision (for supervisor sidebar).
    * Ativos = isFinalized: false.
-   * Keys: triagem, encaminhados-ecommerce, encaminhados-balcao, demanda-telefone-fixo, garantia, troca, estorno, seller-{id}-{sub}.
+   * Keys: triagem, encaminhados-ecommerce, encaminhados-balcao, demanda-telefone-fixo, garantia, troca, estorno, seller-{id}-{sub}, customSidebar-{nodeId}.
    */
   async getSubdivisionCounts(options?: { bust?: boolean }): Promise<Record<string, number>> {
     const url = options?.bust
@@ -161,9 +176,18 @@ export const attendanceService = {
   /**
    * Get all unassigned attendances (for supervisor "Não Atribuídos").
    * filter: 'todos' | 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao'
+   * laneOptions: customLane = fila do atalho; allLanes = incluir todas as filas (vista "Todas"); omitir = árvore principal (sem pin)
    */
-  async getUnassignedAttendances(filter?: string): Promise<Conversation[]> {
-    const qs = filter ? `?filter=${encodeURIComponent(filter)}` : '';
+  async getUnassignedAttendances(
+    filter?: string,
+    customLane?: string,
+    laneOptions?: { allLanes?: boolean }
+  ): Promise<Conversation[]> {
+    const params = new URLSearchParams();
+    if (filter) params.set('filter', filter);
+    if (laneOptions?.allLanes) params.set('allLanes', '1');
+    else if (customLane?.trim()) params.set('customLane', customLane.trim());
+    const qs = params.toString() ? `?${params.toString()}` : '';
     const response = await api.get<GetConversationsBySellerResponse>(`/attendances/unassigned${qs}`);
     return response.data.conversations;
   },
@@ -171,9 +195,15 @@ export const attendanceService = {
   /**
    * Get follow-up attendances by follow-up node.
    */
-  async getFollowUpAttendances(node: 'follow-up' | 'inativo-1h' | 'inativo-12h' | 'inativo-24h'): Promise<Conversation[]> {
+  async getFollowUpAttendances(
+    node: 'follow-up' | 'inativo-1h' | 'inativo-12h' | 'inativo-24h',
+    laneOptions?: { customLane?: string; allLanes?: boolean }
+  ): Promise<Conversation[]> {
+    const params = new URLSearchParams({ node });
+    if (laneOptions?.allLanes) params.set('allLanes', '1');
+    else if (laneOptions?.customLane?.trim()) params.set('customLane', laneOptions.customLane.trim());
     const response = await api.get<GetConversationsBySellerResponse>(
-      `/attendances/supervisor/follow-up?node=${encodeURIComponent(node)}`
+      `/attendances/supervisor/follow-up?${params.toString()}`
     );
     return response.data.conversations;
   },
@@ -181,9 +211,13 @@ export const attendanceService = {
   /**
    * Get attendances "Demanda telefone fixo" (Intervenção humana)
    */
-  async getInterventionDemandaTelefoneFixo(): Promise<Conversation[]> {
+  async getInterventionDemandaTelefoneFixo(laneOptions?: { customLane?: string; allLanes?: boolean }): Promise<Conversation[]> {
+    const params = new URLSearchParams();
+    if (laneOptions?.allLanes) params.set('allLanes', '1');
+    else if (laneOptions?.customLane?.trim()) params.set('customLane', laneOptions.customLane.trim());
+    const qs = params.toString() ? `?${params.toString()}` : '';
     const response = await api.get<GetConversationsBySellerResponse>(
-      '/attendances/intervention/demanda-telefone-fixo'
+      `/attendances/intervention/demanda-telefone-fixo${qs}`
     );
     return response.data.conversations;
   },
@@ -191,9 +225,13 @@ export const attendanceService = {
   /**
    * Get attendances por intervention type (ex.: garantia, troca, estorno)
    */
-  async getInterventionByType(type: string): Promise<Conversation[]> {
+  async getInterventionByType(type: string, laneOptions?: { customLane?: string; allLanes?: boolean }): Promise<Conversation[]> {
+    const params = new URLSearchParams();
+    if (laneOptions?.allLanes) params.set('allLanes', '1');
+    else if (laneOptions?.customLane?.trim()) params.set('customLane', laneOptions.customLane.trim());
+    const qs = params.toString() ? `?${params.toString()}` : '';
     const response = await api.get<GetConversationsBySellerResponse>(
-      `/attendances/intervention/${encodeURIComponent(type)}`
+      `/attendances/intervention/${encodeURIComponent(type)}${qs}`
     );
     return response.data.conversations;
   },
@@ -366,8 +404,8 @@ export const attendanceService = {
   async supervisorMoveQueue(
     attendanceId: UUID,
     target:
-      | { kind: 'nao_atribuidos'; bucket: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao' }
-      | { kind: 'intervencao'; interventionType: 'demanda-telefone-fixo' | 'protese-capilar' | 'outros-assuntos' }
+      | { kind: 'nao_atribuidos'; bucket: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao'; customSidebarNodeId?: string }
+      | { kind: 'intervencao'; interventionType: 'demanda-telefone-fixo' | 'protese-capilar' | 'outros-assuntos'; customSidebarNodeId?: string }
       | { kind: 'vendedor'; sellerId: UUID; sellerSubdivision: string }
   ): Promise<{
     success: boolean;
@@ -377,6 +415,42 @@ export const attendanceService = {
     sellerSubdivision: string | null;
   }> {
     const response = await api.post(`/attendances/${attendanceId}/supervisor/move-queue`, { target });
+    return response.data;
+  },
+
+  /** Lista clientes/atendimentos elegíveis para follow-up manual (supervisor). */
+  async getManualFollowUpCandidates(opts?: {
+    minInactiveMinutes?: number;
+    phase?: 'any' | 'pending_first' | 'pending_second';
+  }): Promise<ManualFollowUpCandidateDto[]> {
+    const params = new URLSearchParams();
+    if (opts?.minInactiveMinutes != null && opts.minInactiveMinutes > 0) {
+      params.set('minInactiveMinutes', String(opts.minInactiveMinutes));
+    }
+    if (opts?.phase && opts.phase !== 'any') params.set('phase', opts.phase);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    const response = await api.get<{ success: boolean; candidates: ManualFollowUpCandidateDto[] }>(
+      `/attendances/supervisor/follow-up/manual/candidates${qs}`
+    );
+    return response.data.candidates ?? [];
+  },
+
+  /** Envia follow-up manual. `customMessage` é obrigatório. Omitir `phase` para o servidor inferir por atendimento. */
+  async sendManualFollowUps(payload: {
+    attendanceIds: string[];
+    phase?: 1 | 2;
+    customMessage: string;
+  }): Promise<{
+    success: boolean;
+    sent: number;
+    failed: Array<{ attendanceId: string; reason: string }>;
+  }> {
+    const body: Record<string, unknown> = {
+      attendanceIds: payload.attendanceIds,
+      customMessage: payload.customMessage.trim(),
+    };
+    if (payload.phase === 1 || payload.phase === 2) body.phase = payload.phase;
+    const response = await api.post(`/attendances/supervisor/follow-up/manual/send`, body);
     return response.data;
   },
 

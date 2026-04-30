@@ -1041,6 +1041,178 @@ Responda em português brasileiro de forma clara e objetiva.`;
     return { entries: next, updatedAt: saved.updatedAt };
   }
 
+  private static readonly SUPERVISOR_SIDEBAR_CUSTOM_TARGETS = new Set<string>([
+    'abertos',
+    'nao-atribuidos-todos',
+    'nao-atribuidos-triagem',
+    'nao-atribuidos-encaminhados-ecommerce',
+    'nao-atribuidos-encaminhados-balcao',
+    'intervencao-humana-root',
+    'service-PROTESE_CAPILAR',
+    'service-MANUTENCAO',
+    'service-OUTROS_ASSUNTOS',
+    'follow-up-root',
+    'follow-up-inativo-1h',
+    'follow-up-inativo-12h',
+    'follow-up-inativo-24h',
+    'fechados',
+    'demandas-all',
+    'demanda-pedidos-orcamentos',
+    'demanda-perguntas-pos-orcamento',
+    'demanda-confirmacao-pix',
+    'demanda-tirar-pedido',
+    'demanda-informacoes-entrega',
+    'demanda-encomendas',
+    'demanda-cliente-pediu-humano',
+  ]);
+
+  private static readonly SUPERVISOR_SIDEBAR_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+  private static readonly SUPERVISOR_SIDEBAR_ICON_RE = /^[a-z0-9_]{1,48}$/i;
+
+  /** Atalhos hierárquicos na barra Entrada (supervisor): labels ícones alvo — persistido em JSON */
+  async getSupervisorSidebarCustom(): Promise<{
+    nodes: Array<{ id: string; label: string; icon?: string; parentId: string | null; order: number; targetId: string }>;
+  }> {
+    try {
+      const config = await this.configRepository.findOne({
+        where: { key: 'supervisor_sidebar_custom' },
+      });
+      if (!config?.value) return { nodes: [] };
+      const raw = typeof config.value === 'string' ? JSON.parse(config.value) : config.value;
+      const nodes = raw?.nodes;
+      if (!Array.isArray(nodes)) return { nodes: [] };
+      const out: Array<{ id: string; label: string; icon?: string; parentId: string | null; order: number; targetId: string }> = [];
+      for (const item of nodes) {
+        if (!item || typeof item !== 'object') continue;
+        const o = item as Record<string, unknown>;
+        const id = typeof o.id === 'string' ? o.id.trim() : '';
+        const label = typeof o.label === 'string' ? o.label.trim() : '';
+        const targetId = typeof o.targetId === 'string' ? o.targetId.trim() : '';
+        if (!AIConfigService.SUPERVISOR_SIDEBAR_ID_RE.test(id)) continue;
+        if (!label || label.length > 80) continue;
+        if (!AIConfigService.SUPERVISOR_SIDEBAR_CUSTOM_TARGETS.has(targetId)) continue;
+        let parentId: string | null = null;
+        if (o.parentId != null) {
+          if (typeof o.parentId !== 'string' || !AIConfigService.SUPERVISOR_SIDEBAR_ID_RE.test(o.parentId)) continue;
+          parentId = o.parentId;
+        }
+        let order = typeof o.order === 'number' && Number.isFinite(o.order) ? Math.floor(o.order) : 0;
+        order = Math.max(0, Math.min(9999, order));
+        const entry: { id: string; label: string; icon?: string; parentId: string | null; order: number; targetId: string } = {
+          id,
+          label: label.slice(0, 80),
+          parentId,
+          order,
+          targetId,
+        };
+        if (typeof o.icon === 'string' && o.icon.trim()) {
+          const ic = o.icon.trim();
+          if (AIConfigService.SUPERVISOR_SIDEBAR_ICON_RE.test(ic)) entry.icon = ic.slice(0, 48);
+        }
+        out.push(entry);
+      }
+      const idSet = new Set(out.map((n) => n.id));
+      const filtered = out.filter((n) => !n.parentId || idSet.has(n.parentId));
+      filtered.sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
+      return { nodes: filtered.slice(0, 60) };
+    } catch (error: any) {
+      logger.error('Error getting supervisor_sidebar_custom', { error: error.message });
+      return { nodes: [] };
+    }
+  }
+
+  async replaceSupervisorSidebarCustom(nodes: unknown): Promise<{
+    nodes: Array<{ id: string; label: string; icon?: string; parentId: string | null; order: number; targetId: string }>;
+    updatedAt: Date;
+  }> {
+    if (!Array.isArray(nodes)) {
+      throw new Error('nodes deve ser um array');
+    }
+    if (nodes.length > 60) {
+      throw new Error('No máximo 60 atalhos permitidos');
+    }
+    const normalized: Array<{ id: string; label: string; icon?: string; parentId: string | null; order: number; targetId: string }> = [];
+    for (let i = 0; i < nodes.length; i++) {
+      const item = nodes[i];
+      if (!item || typeof item !== 'object') throw new Error(`Item ${i} inválido`);
+      const o = item as Record<string, unknown>;
+      const id = typeof o.id === 'string' ? o.id.trim() : '';
+      const label = typeof o.label === 'string' ? o.label.trim() : '';
+      const targetId = typeof o.targetId === 'string' ? o.targetId.trim() : '';
+      if (!AIConfigService.SUPERVISOR_SIDEBAR_ID_RE.test(id)) {
+        throw new Error(`ID inválido no item ${i}`);
+      }
+      if (!label || label.length > 80) {
+        throw new Error(`Label inválido no item ${i}`);
+      }
+      if (!AIConfigService.SUPERVISOR_SIDEBAR_CUSTOM_TARGETS.has(targetId)) {
+        throw new Error(`Destino (targetId) inválido no item ${i}`);
+      }
+      let parentId: string | null = null;
+      if (o.parentId != null) {
+        if (typeof o.parentId !== 'string' || !AIConfigService.SUPERVISOR_SIDEBAR_ID_RE.test(o.parentId)) {
+          throw new Error(`parentId inválido no item ${i}`);
+        }
+        parentId = o.parentId;
+      }
+      let order = typeof o.order === 'number' && Number.isFinite(o.order) ? Math.floor(o.order) : 0;
+      order = Math.max(0, Math.min(9999, order));
+      const entry: { id: string; label: string; icon?: string; parentId: string | null; order: number; targetId: string } = {
+        id,
+        label: label.slice(0, 80),
+        parentId,
+        order,
+        targetId,
+      };
+      if (typeof o.icon === 'string' && o.icon.trim()) {
+        const ic = o.icon.trim();
+        if (!AIConfigService.SUPERVISOR_SIDEBAR_ICON_RE.test(ic)) {
+          throw new Error(`Ícone inválido no item ${i} (use nome Material Icons, ex.: folder)`);
+        }
+        entry.icon = ic.slice(0, 48);
+      }
+      normalized.push(entry);
+    }
+    const idSet = new Set(normalized.map((n) => n.id));
+    if (idSet.size !== normalized.length) {
+      throw new Error('IDs duplicados');
+    }
+    for (const n of normalized) {
+      if (n.parentId === n.id) throw new Error('Um item não pode ser pai de si mesmo');
+      if (n.parentId && !idSet.has(n.parentId)) throw new Error(`parentId inexistente: ${n.parentId}`);
+    }
+    for (const n of normalized) {
+      const seen = new Set<string>();
+      let cur: string | null = n.parentId;
+      let depth = 0;
+      while (cur) {
+        depth++;
+        if (depth > 24 || seen.has(cur)) throw new Error('Ciclo ou hierarquia inválida nos atalhos');
+        seen.add(cur);
+        const p = normalized.find((x) => x.id === cur);
+        cur = p?.parentId ?? null;
+      }
+    }
+    normalized.sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
+    const json = JSON.stringify({ nodes: normalized });
+    let entity = await this.configRepository.findOne({
+      where: { key: 'supervisor_sidebar_custom' },
+    });
+    if (!entity) {
+      entity = this.configRepository.create({
+        key: 'supervisor_sidebar_custom',
+        value: json,
+        metadata: { updatedAt: new Date().toISOString() },
+      });
+    } else {
+      entity.value = json;
+      entity.metadata = { ...(entity.metadata || {}), updatedAt: new Date().toISOString() };
+    }
+    const saved = await this.configRepository.save(entity);
+    logger.info('supervisor_sidebar_custom replaced', { count: normalized.length });
+    return { nodes: normalized, updatedAt: saved.updatedAt };
+  }
+
   /**
    * Get follow-up configuration (times and messages for inactive attendances)
    */

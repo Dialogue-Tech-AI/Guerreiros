@@ -29,6 +29,16 @@ export interface AIConfigResponse {
   imageDescriptionPrompt?: string;
 }
 
+/** Divisões/subdivisões extras na Entrada do supervisor (atalhos para fluxos existentes) */
+export interface SupervisorSidebarCustomNode {
+  id: string;
+  label: string;
+  icon?: string;
+  parentId: string | null;
+  order: number;
+  targetId: string;
+}
+
 class AIConfigService {
   /**
    * Get agent prompt
@@ -277,6 +287,23 @@ class AIConfigService {
       success: boolean;
       message: string;
     }>(`/ai/config/function-calls/${toolName}`);
+  }
+
+  async getSupervisorSidebarCustom(): Promise<{ nodes: SupervisorSidebarCustomNode[] }> {
+    const response = await api.get<{ success: boolean; data: { nodes: SupervisorSidebarCustomNode[] } }>(
+      '/ai/config/supervisor-sidebar-custom'
+    );
+    return response.data.data;
+  }
+
+  async replaceSupervisorSidebarCustom(
+    nodes: SupervisorSidebarCustomNode[]
+  ): Promise<{ nodes: SupervisorSidebarCustomNode[]; updatedAt: Date }> {
+    const response = await api.put<{
+      success: boolean;
+      data: { nodes: SupervisorSidebarCustomNode[]; updatedAt: Date };
+    }>('/ai/config/supervisor-sidebar-custom', { nodes });
+    return response.data.data;
   }
 }
 

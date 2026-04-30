@@ -76,15 +76,15 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
           </div>
           <div className="flex-1">
             <h2 className="text-xl font-bold text-slate-900 dark:text-white" style={{ color: '#0F172A', fontWeight: 700 }}>
-              Mensagens de Follow-up (Inatividade)
+              Follow-up automático (inatividade)
             </h2>
             <p className="text-sm text-slate-500 dark:text-slate-400" style={{ color: '#64748B' }}>
-              Configure os tempos e mensagens enviadas automaticamente quando o cliente fica inativo (sem responder).
+              Mensagens enviadas pelo sistema quando o cliente fica sem responder. O follow-up manual pelo supervisor continua disponível mesmo com isto desligado.
             </p>
           </div>
         </div>
 
-        {/* Botão master de ligar/desligar o follow-up */}
+        {/* Interruptor: apenas envios automáticos */}
         <div
           className={`mt-4 flex items-center justify-between p-4 rounded-xl border-2 transition-all ${
             followUpEnabled
@@ -102,12 +102,12 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
             </span>
             <div>
               <p className="font-bold text-sm" style={{ color: followUpEnabled ? '#15803d' : '#b91c1c' }}>
-                {followUpEnabled ? 'Follow-up ATIVADO' : 'Follow-up DESATIVADO'}
+                {followUpEnabled ? 'Follow-up automático ATIVADO' : 'Follow-up automático DESATIVADO'}
               </p>
               <p className="text-xs" style={{ color: followUpEnabled ? '#166534' : '#991b1b' }}>
                 {followUpEnabled
-                  ? 'Mensagens automáticas de follow-up estão sendo enviadas normalmente.'
-                  : 'Nenhuma mensagem de follow-up será enviada. Atendimentos não serão fechados automaticamente por inatividade.'}
+                  ? 'As mensagens por inatividade são enviadas pelo sistema conforme os tempos abaixo.'
+                  : 'Nenhuma mensagem automática por inatividade será enviada. Supervisores podem continuar a usar follow-up manual na área do supervisor.'}
               </p>
             </div>
           </div>
@@ -129,12 +129,12 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
             ) : followUpEnabled ? (
               <>
                 <span className="material-icons-outlined text-base">power_settings_new</span>
-                Desligar Follow-up
+                Desligar automático
               </>
             ) : (
               <>
                 <span className="material-icons-outlined text-base">power_settings_new</span>
-                Ligar Follow-up
+                Ligar automático
               </>
             )}
           </button>
@@ -151,10 +151,10 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
           <div className="space-y-6">
             <div className="space-y-2">
               <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300" style={{ color: '#475569' }}>
-                Etapas do follow-up
+                Etapas do envio automático
               </h4>
               <p className="text-xs text-slate-500" style={{ color: '#64748b' }}>
-                Ligue ou desligue cada fase de forma independente (requer o interruptor geral acima ativo).
+                Ligue ou desligue cada etapa quando o interruptor de envio automático estiver ativo.
               </p>
               <div className="space-y-2">
                 {toggleRow(
@@ -176,7 +176,7 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
                 )}
                 {toggleRow(
                   'Fechamento automático',
-                  'Move o atendimento para Fechados após as regras de tempo (após o 2º envio ou só após o 1º, se o 2º estiver desligado).',
+                  'Move o atendimento para Fechados após as regras de tempo configuradas.',
                   autoCloseOn,
                   false,
                   () => patch({ autoCloseAfterFollowUpEnabled: !autoCloseOn })
@@ -237,7 +237,7 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
                     Tempo até fechamento automático
                   </label>
                   <p className="text-[11px] text-slate-500 mb-1 leading-snug" style={{ color: '#64748b' }}>
-                    Se só o 1º follow-up estiver ativo: conta a partir do envio da 1ª mensagem. Se o 2º estiver ativo: após o 2º envio usa o tempo da aba Movimentação (Fechados).
+                    Se só a primeira mensagem automática estiver ativa: conta a partir do envio dessa mensagem. Se a segunda também estiver ativa, após o segundo envio o tempo até Fechados vem da aba Movimentação.
                   </p>
                   <div className="flex items-center gap-2">
                     <input
@@ -263,7 +263,7 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
             <div className="space-y-4">
               <div className={!firstOn ? 'opacity-45 pointer-events-none' : ''}>
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2" style={{ color: '#475569' }}>
-                  Mensagem do 1º follow-up
+                  Texto da primeira mensagem automática
                 </label>
                 <textarea
                   disabled={!firstOn}
@@ -277,7 +277,7 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
               </div>
               <div className={!secondOn ? 'opacity-45 pointer-events-none' : ''}>
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2" style={{ color: '#475569' }}>
-                  Mensagem do 2º follow-up
+                  Texto da segunda mensagem automática
                 </label>
                 <textarea
                   disabled={!secondOn}
@@ -297,11 +297,10 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
                 <div className="flex-1">
                   <p className="text-sm font-semibold text-blue-800 dark:text-blue-300 mb-2">Como funciona</p>
                   <ul className="text-xs text-blue-700 dark:text-blue-400 space-y-1.5">
-                    <li>• Cada etapa (1ª mensagem, 2ª mensagem, fechamento) pode ficar ligada ou desligada na secção acima</li>
-                    <li>• A 1ª mensagem usa o tempo sem resposta do cliente; a 2ª conta a partir do envio da 1ª</li>
-                    <li>• Com só o 1º follow-up ativo, o fechamento usa o campo &quot;Tempo até fechamento automático&quot; desta página</li>
-                    <li>• Com o 2º ativo, após a 2ª mensagem o tempo até Fechados vem da configuração de Movimentação</li>
-                    <li>• Qualquer resposta do cliente reinicia os contadores</li>
+                    <li>• Cada etapa (mensagens e fechamento) pode ficar ligada ou desligada na secção acima.</li>
+                    <li>• A primeira mensagem usa o tempo sem resposta do cliente; a segunda conta a partir do envio da primeira.</li>
+                    <li>• Qualquer resposta do cliente reinicia os contadores do ciclo.</li>
+                    <li>• O supervisor pode enviar follow-up manual em paralelo; isso não depende deste interruptor.</li>
                   </ul>
                 </div>
               </div>
@@ -322,7 +321,7 @@ export const FollowUpConfigTab: React.FC<FollowUpConfigTabProps> = ({
                 ) : (
                   <>
                     <span className="material-icons-outlined text-lg">save</span>
-                    Salvar Follow-up
+                    Salvar configuração
                   </>
                 )}
               </button>

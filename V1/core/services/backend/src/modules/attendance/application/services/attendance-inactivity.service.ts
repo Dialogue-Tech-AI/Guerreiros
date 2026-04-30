@@ -15,6 +15,19 @@ import { invalidateSubdivisionCountsCache } from '../../presentation/controllers
 const FC_NAME_FECHA_BALCAO = 'fechaatendimentobalcao';
 const DEFAULT_TEMPO_INATIVIDADE_BALCAO_MIN = 30; // 30 minutos padrão
 
+/** Linha para follow-up manual na aba do supervisor (filtros + pré-visualização). */
+export interface ManualFollowUpCandidateRow {
+  attendanceId: string;
+  clientPhone: string;
+  clientName: string;
+  lastClientMessageAt: string;
+  inactiveMinutes: number;
+  firstSentAt: string | null;
+  secondSentAt: string | null;
+  suggestedPhase: 1 | 2 | null;
+  messagePreview: string;
+}
+
 export class AttendanceInactivityService {
   /**
    * Check and send follow-up messages for inactive attendances (por etapa, conforme config).
@@ -205,7 +218,7 @@ export class AttendanceInactivityService {
     }
   }
 
-  private async sendFollowUpMessage(attendance: Attendance, step: 1 | 2, content: string): Promise<boolean> {
+  async sendFollowUpMessage(attendance: Attendance, step: 1 | 2, content: string): Promise<boolean> {
     try {
       const messageRepo = AppDataSource.getRepository(Message);
       const message = messageRepo.create({
@@ -789,5 +802,289 @@ export class AttendanceInactivityService {
       });
       return 0;
     }
+  }
+
+  /**
+   * Lista atendimentos elegíveis para follow-up manual (mesmas regras base do job de inatividade,
+   * sem exigir que o tempo automático já tenha passado).
+   */
+  async listManualFollowUpCandidatesForSupervisor(opts: {
+    supervisorId: string;
+    supervisedSellerIds: string[];
+    minInactiveMinutes: number;
+    phaseFilter: 'any' | 'pending_first' | 'pending_second';
+  }): Promise<ManualFollowUpCandidateRow[]> {
+    const attendanceRepo = AppDataSource.getRepository(Attendance);
+    const messageRepo = AppDataSource.getRepository(Message);
+    const followUpConfig = await aiConfigService.getFollowUpConfig();
+    const supervisedSet = new Set(opts.supervisedSellerIds.map(String));
+
+    const pendingAttendances = await attendanceRepo.find({
+      where: {
+        operationalState: In([
+          OperationalState.TRIAGEM,
+          OperationalState.ABERTO,
+          OperationalState.EM_ATENDIMENTO,
+          OperationalState.AGUARDANDO_CLIENTE,
+        ]),
+        isFinalized: false,
+      },
+    });
+
+    const now = Date.now();
+    const rows: ManualFollowUpCandidateRow[] = [];
+
+    for (const attendance of pendingAttendances) {
+      const sellerId = attendance.sellerId ?? null;
+      const canAccess =
+        !sellerId ||
+        attendance.supervisorId === opts.supervisorId ||
+        supervisedSet.has(String(sellerId));
+      if (!canAccess) continue;
+
+      const aiContext = (attendance.aiContext ?? {}) as Record<string, any>;
+      if (aiContext.closedManually) continue;
+      if (attendance.interventionType === 'demanda-telefone-fixo') continue;
+
+      const lastClientMessageAt = attendance.lastClientMessageAt ?? null;
+      if (!lastClientMessageAt) continue;
+
+      const replyAfterClient = await messageRepo.findOne({
+        where: {
+          attendanceId: attendance.id,
+          origin: In([MessageOrigin.AI, MessageOrigin.SELLER]),
+          sentAt: Not(LessThan(lastClientMessageAt)),
+        },
+        order: { sentAt: 'ASC' },
+      });
+      if (!replyAfterClient) continue;
+
+      const followUpState = (aiContext.followUpState ?? {}) as {
+        lastClientMessageAt?: string;
+        firstSentAt?: string;
+        secondSentAt?: string;
+      };
+      const lastClientIso = lastClientMessageAt.toISOString();
+      const trackedClientIso = followUpState.lastClientMessageAt;
+      const isSameClientCycle = trackedClientIso === lastClientIso;
+      const normalizedState = isSameClientCycle
+        ? followUpState
+        : { lastClientMessageAt: lastClientIso };
+
+      const inactiveMinutes = Math.floor((now - lastClientMessageAt.getTime()) / 60000);
+      if (inactiveMinutes < opts.minInactiveMinutes) continue;
+
+      const firstSentAt = normalizedState.firstSentAt ?? null;
+      const secondSentAt = normalizedState.secondSentAt ?? null;
+
+      let suggestedPhase: 1 | 2 | null = null;
+      const firstOn = followUpConfig.firstFollowUpEnabled !== false;
+      const secondOn = followUpConfig.secondFollowUpEnabled !== false;
+      if (!firstSentAt && firstOn) suggestedPhase = 1;
+      else if (firstSentAt && !secondSentAt && secondOn) suggestedPhase = 2;
+      else continue;
+
+      if (opts.phaseFilter === 'pending_first' && suggestedPhase !== 1) continue;
+      if (opts.phaseFilter === 'pending_second' && suggestedPhase !== 2) continue;
+
+      const messagePreview =
+        suggestedPhase === 1 ? followUpConfig.firstMessage : followUpConfig.secondMessage;
+
+      const clientName =
+        (attendance.clientPhone ?? '').split('@')[0]?.trim() || attendance.clientPhone || '—';
+
+      rows.push({
+        attendanceId: attendance.id,
+        clientPhone: attendance.clientPhone,
+        clientName,
+        lastClientMessageAt: lastClientIso,
+        inactiveMinutes,
+        firstSentAt,
+        secondSentAt,
+        suggestedPhase,
+        messagePreview,
+      });
+    }
+
+    rows.sort((a, b) => b.inactiveMinutes - a.inactiveMinutes);
+    return rows;
+  }
+
+  /**
+   * Envia follow-up manual para os IDs indicados.
+   * Independente do interruptor global de follow-up automático (Super Admin).
+   * Se `phase` omitido, usa o próximo passo pendente por atendimento (inicial ou segundo neste ciclo).
+   */
+  async sendManualFollowUpsForSupervisor(opts: {
+    supervisorId: string;
+    supervisedSellerIds: string[];
+    attendanceIds: string[];
+    /** Omitir = inferir por atendimento o próximo envio pendente no ciclo atual. */
+    phase?: 1 | 2;
+    /** Texto enviado ao cliente (obrigatório). */
+    customMessage: string;
+  }): Promise<{ sent: number; failed: Array<{ attendanceId: string; reason: string }> }> {
+    const failed: Array<{ attendanceId: string; reason: string }> = [];
+
+    const attendanceRepo = AppDataSource.getRepository(Attendance);
+    const messageRepo = AppDataSource.getRepository(Message);
+    const supervisedSet = new Set(opts.supervisedSellerIds.map(String));
+    let sent = 0;
+    const customText = opts.customMessage.trim();
+    if (customText.length === 0) {
+      return {
+        sent: 0,
+        failed: opts.attendanceIds.map((id) => ({ attendanceId: id, reason: 'Mensagem obrigatória' })),
+      };
+    }
+    for (const rawId of opts.attendanceIds) {
+      try {
+        const attendance = await attendanceRepo.findOne({
+          where: { id: rawId as any },
+        });
+        if (!attendance) {
+          failed.push({ attendanceId: rawId, reason: 'Atendimento não encontrado' });
+          continue;
+        }
+
+        const sellerId = attendance.sellerId ?? null;
+        const canAccess =
+          !sellerId ||
+          attendance.supervisorId === opts.supervisorId ||
+          supervisedSet.has(String(sellerId));
+        if (!canAccess) {
+          failed.push({ attendanceId: rawId, reason: 'Sem permissão' });
+          continue;
+        }
+
+        if (attendance.isFinalized || attendance.operationalState === OperationalState.FECHADO_OPERACIONAL) {
+          failed.push({ attendanceId: rawId, reason: 'Atendimento fechado' });
+          continue;
+        }
+
+        const aiContext = (attendance.aiContext ?? {}) as Record<string, any>;
+        if (aiContext.closedManually) {
+          failed.push({ attendanceId: rawId, reason: 'Marcado como fechado manualmente' });
+          continue;
+        }
+        if (attendance.interventionType === 'demanda-telefone-fixo') {
+          failed.push({ attendanceId: rawId, reason: 'Manutenção (demanda telefone fixo) sem follow-up' });
+          continue;
+        }
+
+        const lastClientMessageAt = attendance.lastClientMessageAt ?? null;
+        if (!lastClientMessageAt) {
+          failed.push({ attendanceId: rawId, reason: 'Sem mensagem do cliente' });
+          continue;
+        }
+
+        const replyAfterClient = await messageRepo.findOne({
+          where: {
+            attendanceId: attendance.id,
+            origin: In([MessageOrigin.AI, MessageOrigin.SELLER]),
+            sentAt: Not(LessThan(lastClientMessageAt)),
+          },
+          order: { sentAt: 'ASC' },
+        });
+        if (!replyAfterClient) {
+          failed.push({
+            attendanceId: rawId,
+            reason: 'Sem resposta AI/vendedor após última mensagem do cliente',
+          });
+          continue;
+        }
+
+        const followUpState = (aiContext.followUpState ?? {}) as {
+          lastClientMessageAt?: string;
+          firstSentAt?: string;
+          secondSentAt?: string;
+        };
+        const lastClientIso = lastClientMessageAt.toISOString();
+        const trackedClientIso = followUpState.lastClientMessageAt;
+        const isSameClientCycle = trackedClientIso === lastClientIso;
+        const normalizedState = isSameClientCycle
+          ? followUpState
+          : { lastClientMessageAt: lastClientIso };
+
+        let effectivePhase: 1 | 2;
+        if (opts.phase === 1 || opts.phase === 2) {
+          effectivePhase = opts.phase;
+        } else {
+          if (!normalizedState.firstSentAt) effectivePhase = 1;
+          else if (!normalizedState.secondSentAt) effectivePhase = 2;
+          else {
+            failed.push({
+              attendanceId: rawId,
+              reason: 'Nenhum follow-up pendente neste ciclo para este atendimento',
+            });
+            continue;
+          }
+        }
+
+        if (effectivePhase === 1) {
+          if (normalizedState.firstSentAt) {
+            failed.push({
+              attendanceId: rawId,
+              reason: 'Follow-up inicial já enviado neste ciclo',
+            });
+            continue;
+          }
+          const body = customText;
+          const ok = await this.sendFollowUpMessage(attendance, 1, body);
+          if (!ok) {
+            failed.push({ attendanceId: rawId, reason: 'Falha ao enviar mensagem' });
+            continue;
+          }
+          attendance.aiContext = {
+            ...aiContext,
+            followUpState: {
+              ...normalizedState,
+              firstSentAt: new Date().toISOString(),
+            },
+          };
+          await attendanceRepo.save(attendance);
+          sent++;
+        } else {
+          if (!normalizedState.firstSentAt) {
+            failed.push({
+              attendanceId: rawId,
+              reason: 'É necessário enviar o follow-up inicial neste ciclo antes deste envio',
+            });
+            continue;
+          }
+          if (normalizedState.secondSentAt) {
+            failed.push({
+              attendanceId: rawId,
+              reason: 'Todos os follow-ups deste ciclo já foram enviados',
+            });
+            continue;
+          }
+          const body = customText;
+          const ok = await this.sendFollowUpMessage(attendance, 2, body);
+          if (!ok) {
+            failed.push({ attendanceId: rawId, reason: 'Falha ao enviar mensagem' });
+            continue;
+          }
+          attendance.aiContext = {
+            ...aiContext,
+            followUpState: {
+              ...normalizedState,
+              secondSentAt: new Date().toISOString(),
+            },
+          };
+          await attendanceRepo.save(attendance);
+          sent++;
+        }
+      } catch (e: any) {
+        failed.push({ attendanceId: rawId, reason: e?.message ?? 'Erro' });
+      }
+    }
+
+    if (sent > 0) {
+      invalidateSubdivisionCountsCache();
+      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
+    }
+
+    return { sent, failed };
   }
 }

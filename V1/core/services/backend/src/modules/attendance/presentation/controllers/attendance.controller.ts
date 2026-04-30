@@ -1,4 +1,32 @@
 import { Router, Request, Response } from 'express';
+
+/** Modo de listagem: fila virtual (customLane), tudo (allLanes) ou árvore principal (exclui com pin). */
+type SupervisorLaneListMode = { kind: 'all' } | { kind: 'lane'; laneId: string } | { kind: 'excludePins' };
+
+function parseSupervisorLaneListMode(req: Request): SupervisorLaneListMode {
+  const allLanes = req.query.allLanes === '1' || req.query.allLanes === 'true';
+  if (allLanes) return { kind: 'all' };
+  const customLaneParam = typeof req.query.customLane === 'string' ? req.query.customLane.trim() : '';
+  const laneRe = /^[a-zA-Z0-9_-]{1,64}$/;
+  if (laneRe.test(customLaneParam)) return { kind: 'lane', laneId: customLaneParam };
+  return { kind: 'excludePins' };
+}
+
+function filterAttendancesBySupervisorLaneMode<T extends { aiContext?: Record<string, unknown> | null | undefined }>(
+  list: T[],
+  mode: SupervisorLaneListMode
+): T[] {
+  if (mode.kind === 'all') return list;
+  if (mode.kind === 'lane') {
+    return list.filter(
+      (a) => ((a.aiContext ?? {}) as Record<string, unknown>).supervisorCustomSidebarNodeId === mode.laneId
+    );
+  }
+  return list.filter((a) => {
+    const sid = ((a.aiContext ?? {}) as Record<string, unknown>).supervisorCustomSidebarNodeId;
+    return sid == null || sid === '';
+  });
+}
 import multer from 'multer';
 import { Not, In, LessThan } from 'typeorm';
 import { AppDataSource } from '../../../../shared/infrastructure/database/typeorm/config/database.config';
@@ -19,6 +47,7 @@ import { Notification, NotificationType } from '../../../notification/domain/ent
 import { QuoteRequest } from '../../../quote/domain/entities/quote-request.entity';
 import { aiConfigService } from '../../../ai/application/services/ai-config.service';
 import { getSellersBySupervisorId } from '../../../seller/application/get-sellers-by-supervisor';
+import { AttendanceInactivityService } from '../../application/services/attendance-inactivity.service';
 
 function normalizePhone(phone: string): string {
   return (phone || '').replace(/\D/g, '');
@@ -85,6 +114,14 @@ export class AttendanceController {
     this.router.get(
       '/supervisor/follow-up',
       this.getFollowUpAttendances.bind(this)
+    );
+    this.router.get(
+      '/supervisor/follow-up/manual/candidates',
+      this.getManualFollowUpCandidates.bind(this)
+    );
+    this.router.post(
+      '/supervisor/follow-up/manual/send',
+      this.postManualFollowUpSend.bind(this)
     );
 
     // Get supervisor statistics (cards + by brand)
@@ -732,6 +769,7 @@ export class AttendanceController {
    * - triagem: operationalState TRIAGEM + isTriagem (sem interventionType ecommerce/balcão/etc). identificamarca roteia → ABERTO + sellerId → sai da triagem.
    * - encaminhados-ecommerce: intervention_type = encaminhados-ecommerce (inclui interventionData)
    * - encaminhados-balcao: intervention_type = encaminhados-balcao (inclui interventionData)
+   * Query: ?customLane= | ?allLanes=1 | (default exclui filas personalizadas)
    */
   private async getUnassignedAttendances(req: Request, res: Response): Promise<void> {
     try {
@@ -858,8 +896,12 @@ export class AttendanceController {
         attendances = allUnassigned.filter((a) => isAiOpenFlow(a));
       }
 
+      const laneMode = parseSupervisorLaneListMode(req);
+
       // Remover do "Abertos/AI" quem já entrou no fluxo de follow-up.
-      if (filter === 'todos' || filter === 'triagem') {
+      // Exceção: vista ?customLane= (fila do atalho) — o supervisor deve ver ali todos os contactos com esse pin,
+      // incluindo os que já estão no funil de follow-up (senão "só aparecem em Todas").
+      if ((filter === 'todos' || filter === 'triagem') && laneMode.kind !== 'lane') {
         const filtered: Attendance[] = [];
         for (const attendance of attendances) {
           if (isAiOpenFlow(attendance) && await isInFollowUpFlow(attendance)) {
@@ -869,6 +911,9 @@ export class AttendanceController {
         }
         attendances = filtered;
       }
+
+      attendances = filterAttendancesBySupervisorLaneMode(attendances, laneMode);
+
       attendances = await filterBlacklistedAttendances(attendances);
 
       // Get last message for each attendance
@@ -959,6 +1004,10 @@ export class AttendanceController {
             createdAt: attendance.createdAt.toISOString(),
             updatedAt: attendance.updatedAt.toISOString(),
           };
+          const laneId = (aiContext as Record<string, unknown>).supervisorCustomSidebarNodeId;
+          if (typeof laneId === 'string' && laneId) {
+            item.supervisorCustomSidebarNodeId = laneId;
+          }
           if (filter === 'todos') {
             item.unassignedSource = unassignedSource;
           }
@@ -1014,6 +1063,7 @@ export class AttendanceController {
         order: { updatedAt: 'DESC' },
       });
       attendances = await filterBlacklistedAttendances(attendances);
+      attendances = filterAttendancesBySupervisorLaneMode(attendances, parseSupervisorLaneListMode(req));
 
       const messageRepo = AppDataSource.getRepository(Message);
       const conversations = await Promise.all(
@@ -1062,6 +1112,8 @@ export class AttendanceController {
             clientName = lastMessage.metadata.pushName;
           }
 
+          const aiCtx = (attendance.aiContext ?? {}) as Record<string, unknown>;
+          const pin = aiCtx.supervisorCustomSidebarNodeId;
           return {
             id: attendance.id,
             clientPhone: attendance.clientPhone,
@@ -1076,6 +1128,7 @@ export class AttendanceController {
             createdAt: attendance.createdAt.toISOString(),
             updatedAt: attendance.updatedAt.toISOString(),
             interventionData: attendance.interventionData ?? undefined,
+            ...(typeof pin === 'string' && pin ? { supervisorCustomSidebarNodeId: pin } : {}),
           };
         })
       );
@@ -1141,6 +1194,7 @@ export class AttendanceController {
         .orderBy('a.updated_at', 'DESC')
         .getMany();
       attendances = await filterBlacklistedAttendances(attendances);
+      attendances = filterAttendancesBySupervisorLaneMode(attendances, parseSupervisorLaneListMode(req));
 
       const messageRepo = AppDataSource.getRepository(Message);
       const conversations = await Promise.all(
@@ -1189,6 +1243,8 @@ export class AttendanceController {
             clientName = lastMessage.metadata.pushName;
           }
 
+          const aiCtx = (attendance.aiContext ?? {}) as Record<string, unknown>;
+          const pin = aiCtx.supervisorCustomSidebarNodeId;
           return {
             id: attendance.id,
             clientPhone: attendance.clientPhone,
@@ -1204,6 +1260,7 @@ export class AttendanceController {
             updatedAt: attendance.updatedAt.toISOString(),
             interventionType: type,
             interventionData: attendance.interventionData ?? undefined,
+            ...(typeof pin === 'string' && pin ? { supervisorCustomSidebarNodeId: pin } : {}),
           };
         })
       );
@@ -1640,7 +1697,7 @@ export class AttendanceController {
   /**
    * Get active attendance counts per subdivision (for supervisor sidebar).
    * Ativos = isFinalized: false.
-   * Keys: triagem, encaminhados-ecommerce, encaminhados-balcao, demanda-telefone-fixo, outros-assuntos, garantia, troca, estorno, seller-{id}-{sub}.
+   * Keys: triagem, encaminhados-ecommerce, encaminhados-balcao, demanda-telefone-fixo, outros-assuntos, garantia, troca, estorno, seller-{id}-{sub}, customSidebar-{nodeId}.
    */
   private async getSubdivisionCounts(req: Request, res: Response): Promise<void> {
     try {
@@ -1673,19 +1730,9 @@ export class AttendanceController {
         Date.now() - movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000
       ).toISOString();
 
-      const isTriagem = (a: Attendance) =>
-        a.interventionType !== 'demanda-telefone-fixo' &&
-        a.interventionType !== 'encaminhados-ecommerce' &&
-        a.interventionType !== 'encaminhados-balcao' &&
-        a.interventionType !== 'protese-capilar' &&
-        a.interventionType !== 'outros-assuntos';
-      /** Inclui TRIAGEM, ABERTO, EM_ATENDIMENTO, AGUARDANDO_CLIENTE - fluxo AI em andamento. Alinha com isAiOpenFlow da listagem. */
-      const isAiOpenFlowState = (a: Attendance) =>
-        a.operationalState === OperationalState.TRIAGEM ||
-        a.operationalState === OperationalState.ABERTO ||
-        a.operationalState === OperationalState.EM_ATENDIMENTO ||
-        a.operationalState === OperationalState.AGUARDANDO_CLIENTE ||
-        a.operationalState == null;
+      /** Alinha com listagem sem customLane: exclui fila virtual (atalho personalizado). */
+      const noSupervisorCustomLaneSql =
+        "((a.ai_context->>'supervisorCustomSidebarNodeId') IS NULL OR (a.ai_context->>'supervisorCustomSidebarNodeId') = '')";
 
       /** Excluir do triagem quem já entrou no follow-up (ex.: após 1h inatividade) */
       const notInFollowUpCondition = `NOT (
@@ -1700,6 +1747,8 @@ export class AttendanceController {
         )
       )`;
 
+      const followUpCountParams = { moveOpenToFirstCutoff, minSecondSentAt };
+
       const triagemCount = await attendanceRepo
         .createQueryBuilder('a')
         .where('a.seller_id IS NULL')
@@ -1712,20 +1761,26 @@ export class AttendanceController {
           "(a.operational_state IN (:...aiStates) OR a.operational_state IS NULL)",
           { aiStates: [OperationalState.TRIAGEM, OperationalState.ABERTO, OperationalState.EM_ATENDIMENTO, OperationalState.AGUARDANDO_CLIENTE] }
         )
-        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt })
+        .andWhere(notInFollowUpCondition, followUpCountParams)
+        .andWhere(noSupervisorCustomLaneSql)
         .getCount();
       counts['triagem'] = triagemCount;
 
-      const allUnassigned = await attendanceRepo.find({
-        where: { 
-          sellerId: null as any, 
-          isFinalized: false,
-          operationalState: Not(In([OperationalState.FECHADO_OPERACIONAL, OperationalState.AGUARDANDO_PRIMEIRA_MSG])),
-        },
-        select: ['id', 'interventionType', 'operationalState'],
-      });
-      counts['encaminhados-ecommerce'] = allUnassigned.filter((a) => a.interventionType === 'encaminhados-ecommerce').length;
-      counts['encaminhados-balcao'] = allUnassigned.filter((a) => a.interventionType === 'encaminhados-balcao').length;
+      const unassignedEncBase = () =>
+        attendanceRepo
+          .createQueryBuilder('a')
+          .where('a.seller_id IS NULL')
+          .andWhere('a.is_finalized = :fin', { fin: false })
+          .andWhere('a.operational_state NOT IN (:...exclStates)', {
+            exclStates: [OperationalState.FECHADO_OPERACIONAL, OperationalState.AGUARDANDO_PRIMEIRA_MSG],
+          })
+          .andWhere(noSupervisorCustomLaneSql);
+      counts['encaminhados-ecommerce'] = await unassignedEncBase()
+        .andWhere("a.intervention_type = 'encaminhados-ecommerce'")
+        .getCount();
+      counts['encaminhados-balcao'] = await unassignedEncBase()
+        .andWhere("a.intervention_type = 'encaminhados-balcao'")
+        .getCount();
 
       const interventionTypes = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
       const interventionRows = await attendanceRepo
@@ -1735,12 +1790,112 @@ export class AttendanceController {
         .where('a.is_finalized = :fin', { fin: false })
         .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
         .andWhere('a.intervention_type IN (:...types)', { types: interventionTypes as unknown as string[] })
-        .andWhere(notInFollowUpCondition, { moveOpenToFirstCutoff, minSecondSentAt })
+        .andWhere(notInFollowUpCondition, followUpCountParams)
+        .andWhere(noSupervisorCustomLaneSql)
         .groupBy('a.intervention_type')
         .getRawMany();
       const interventionMap = new Map<string, number>();
       for (const row of interventionRows) interventionMap.set(row.interventionType, parseInt(row.count, 10) || 0);
       for (const t of interventionTypes) counts[t] = interventionMap.get(t) || 0;
+
+      const { nodes: supervisorCustomNodes } = await aiConfigService.getSupervisorSidebarCustom();
+      const laneMatchSql = "(a.ai_context->>'supervisorCustomSidebarNodeId') = :laneId";
+
+      const countLaneTriagem = (laneId: string) =>
+        attendanceRepo
+          .createQueryBuilder('a')
+          .where('a.seller_id IS NULL')
+          .andWhere('a.is_finalized = :fin', { fin: false })
+          .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
+          .andWhere(
+            "(a.intervention_type IS NULL OR a.intervention_type NOT IN ('demanda-telefone-fixo', 'encaminhados-ecommerce', 'encaminhados-balcao', 'protese-capilar', 'outros-assuntos'))"
+          )
+          .andWhere(
+            '(a.operational_state IN (:...aiStates) OR a.operational_state IS NULL)',
+            {
+              aiStates: [
+                OperationalState.TRIAGEM,
+                OperationalState.ABERTO,
+                OperationalState.EM_ATENDIMENTO,
+                OperationalState.AGUARDANDO_CLIENTE,
+              ],
+            }
+          )
+          .andWhere(laneMatchSql, { laneId })
+          .getCount();
+
+      const countLaneEncaminhados = (laneId: string, encType: 'encaminhados-ecommerce' | 'encaminhados-balcao') =>
+        attendanceRepo
+          .createQueryBuilder('a')
+          .where('a.seller_id IS NULL')
+          .andWhere('a.is_finalized = :fin', { fin: false })
+          .andWhere('a.operational_state NOT IN (:...exclStates)', {
+            exclStates: [OperationalState.FECHADO_OPERACIONAL, OperationalState.AGUARDANDO_PRIMEIRA_MSG],
+          })
+          .andWhere('a.intervention_type = :encType', { encType })
+          .andWhere(laneMatchSql, { laneId })
+          .getCount();
+
+      const countLaneInterventionType = (laneId: string, it: string) =>
+        attendanceRepo
+          .createQueryBuilder('a')
+          .where('a.is_finalized = :fin', { fin: false })
+          .andWhere('a.operational_state != :closed', { closed: OperationalState.FECHADO_OPERACIONAL })
+          .andWhere('a.intervention_type = :it', { it })
+          .andWhere(notInFollowUpCondition, followUpCountParams)
+          .andWhere(laneMatchSql, { laneId })
+          .getCount();
+
+      await Promise.all(
+        supervisorCustomNodes.map(async (node) => {
+          const key = `customSidebar-${node.id}`;
+          let laneCount = 0;
+          switch (node.targetId) {
+            case 'abertos': {
+              const [tri, eco, bal] = await Promise.all([
+                countLaneTriagem(node.id),
+                countLaneEncaminhados(node.id, 'encaminhados-ecommerce'),
+                countLaneEncaminhados(node.id, 'encaminhados-balcao'),
+              ]);
+              laneCount = tri + eco + bal;
+              break;
+            }
+            case 'nao-atribuidos-triagem':
+              laneCount = await countLaneTriagem(node.id);
+              break;
+            case 'nao-atribuidos-todos': {
+              const [tri, eco, bal] = await Promise.all([
+                countLaneTriagem(node.id),
+                countLaneEncaminhados(node.id, 'encaminhados-ecommerce'),
+                countLaneEncaminhados(node.id, 'encaminhados-balcao'),
+              ]);
+              laneCount = tri + eco + bal;
+              break;
+            }
+            case 'nao-atribuidos-encaminhados-ecommerce':
+              laneCount = await countLaneEncaminhados(node.id, 'encaminhados-ecommerce');
+              break;
+            case 'nao-atribuidos-encaminhados-balcao':
+              laneCount = await countLaneEncaminhados(node.id, 'encaminhados-balcao');
+              break;
+            case 'intervencao-humana-root':
+              laneCount = await countLaneInterventionType(node.id, 'demanda-telefone-fixo');
+              break;
+            case 'service-PROTESE_CAPILAR':
+              laneCount = await countLaneInterventionType(node.id, 'protese-capilar');
+              break;
+            case 'service-MANUTENCAO':
+              laneCount = await countLaneInterventionType(node.id, 'demanda-telefone-fixo');
+              break;
+            case 'service-OUTROS_ASSUNTOS':
+              laneCount = await countLaneInterventionType(node.id, 'outros-assuntos');
+              break;
+            default:
+              laneCount = 0;
+          }
+          if (laneCount > 0) counts[key] = laneCount;
+        })
+      );
 
       const sellerRepo = AppDataSource.getRepository(Seller);
       const sellers = await getSellersBySupervisorId(sellerRepo, supervisorId as string, { withUser: false });
@@ -1796,7 +1951,8 @@ export class AttendanceController {
         .andWhere(
           `(a.seller_id IS NOT NULL OR (${notInFollowUpCondition}))`,
           { moveOpenToFirstCutoff, minSecondSentAt }
-        );
+        )
+        .andWhere(noSupervisorCustomLaneSql);
       counts['abertos'] = await openQb.getCount();
       
       // Contar APENAS pendências (quote_requests) por subdivisão
@@ -1862,7 +2018,8 @@ export class AttendanceController {
       // - inativo-24h: já recebeu 2º follow-up e ainda não atingiu tempo para Fechados
       const moveToFechadosMinutes = movementConfig.moveToFechadosAfterSecondFollowUpMinutes;
       const followUpBaseWhere =
-        "a.is_finalized = :fin AND a.operational_state IN (:...followUpStates) AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo') AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at)";
+        "a.is_finalized = :fin AND a.operational_state IN (:...followUpStates) AND a.last_client_message_at IS NOT NULL AND (a.seller_id IS NULL OR a.supervisor_id = :supervisorId OR a.seller_id IN (SELECT seller_id FROM seller_supervisors WHERE supervisor_id = :supervisorId)) AND COALESCE(a.ai_context->>'closedManually', 'false') != 'true' AND (a.intervention_type IS NULL OR a.intervention_type != 'demanda-telefone-fixo') AND EXISTS (SELECT 1 FROM messages mr WHERE mr.attendance_id = a.id AND mr.origin IN (:aiOrigin, :sellerOrigin) AND mr.sent_at >= a.last_client_message_at) AND " +
+        noSupervisorCustomLaneSql;
       const followUpParams = {
         fin: false,
         followUpStates: [
@@ -1994,6 +2151,7 @@ export class AttendanceController {
         .orderBy('a.updated_at', 'DESC')
         .getMany();
       attendances = await filterBlacklistedAttendances(attendances);
+      attendances = filterAttendancesBySupervisorLaneMode(attendances, parseSupervisorLaneListMode(req));
 
       const conversations = await Promise.all(
         attendances.map(async (attendance) => {
@@ -2053,6 +2211,8 @@ export class AttendanceController {
             followUpPhase = 'Aguardando';
           }
 
+          const aiCtxFu = (attendance.aiContext ?? {}) as Record<string, unknown>;
+          const pinFu = aiCtxFu.supervisorCustomSidebarNodeId;
           return {
             id: attendance.id,
             clientPhone: attendance.clientPhone,
@@ -2067,6 +2227,7 @@ export class AttendanceController {
             createdAt: attendance.createdAt.toISOString(),
             updatedAt: attendance.updatedAt.toISOString(),
             followUpPhase,
+            ...(typeof pinFu === 'string' && pinFu ? { supervisorCustomSidebarNodeId: pinFu } : {}),
           };
         })
       );
@@ -2074,6 +2235,120 @@ export class AttendanceController {
       res.json({ success: true, conversations });
     } catch (error: any) {
       logger.error('Error getting follow-up attendances', {
+        error: error.message,
+        supervisorId: (req as any).user?.sub,
+      });
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /** Lista candidatos a follow-up manual (aba Supervisor → Follow up). */
+  private async getManualFollowUpCandidates(req: Request, res: Response): Promise<void> {
+    try {
+      const supervisorId = (req as any).user?.sub;
+      if (!supervisorId) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      const userRepo = AppDataSource.getRepository(User);
+      const sup = await userRepo.findOne({ where: { id: supervisorId as UUID } });
+      if (!sup || sup.role !== UserRole.SUPERVISOR) {
+        res.status(403).json({ error: 'Acesso apenas para supervisor' });
+        return;
+      }
+
+      const sellerRepo = AppDataSource.getRepository(Seller);
+      const sellers = await getSellersBySupervisorId(sellerRepo, supervisorId as string, { withUser: false });
+      const supervisedSellerIds = sellers.map((s) => String(s.id));
+
+      const minInactiveMinutes = Math.max(0, parseInt(String(req.query.minInactiveMinutes ?? '0'), 10) || 0);
+      const phaseRaw = String(req.query.phase ?? 'any');
+      const phaseFilter: 'any' | 'pending_first' | 'pending_second' =
+        phaseRaw === 'pending_first' || phaseRaw === 'pending_second' ? phaseRaw : 'any';
+
+      const svc = new AttendanceInactivityService();
+      let candidates = await svc.listManualFollowUpCandidatesForSupervisor({
+        supervisorId: supervisorId as string,
+        supervisedSellerIds,
+        minInactiveMinutes,
+        phaseFilter,
+      });
+      candidates = await filterBlacklistedAttendances(candidates);
+
+      res.json({ success: true, candidates });
+    } catch (error: any) {
+      logger.error('Error listing manual follow-up candidates', {
+        error: error.message,
+        supervisorId: (req as any).user?.sub,
+      });
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  /** Follow-up manual: não depende do interruptor global de envio automático. Body opcional `phase` (1|2); sem phase infere por atendimento. */
+  private async postManualFollowUpSend(req: Request, res: Response): Promise<void> {
+    try {
+      const supervisorId = (req as any).user?.sub as UUID;
+      if (!supervisorId) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      const userRepo = AppDataSource.getRepository(User);
+      const sup = await userRepo.findOne({ where: { id: supervisorId } });
+      if (!sup || sup.role !== UserRole.SUPERVISOR) {
+        res.status(403).json({ error: 'Acesso apenas para supervisor' });
+        return;
+      }
+
+      const body = req.body as { attendanceIds?: unknown; phase?: unknown; customMessage?: unknown };
+      const attendanceIds = Array.isArray(body.attendanceIds)
+        ? body.attendanceIds.filter((x): x is string => typeof x === 'string')
+        : [];
+      let phase: 1 | 2 | undefined;
+      if (body.phase === 2 || body.phase === '2') phase = 2;
+      else if (body.phase === 1 || body.phase === '1') phase = 1;
+      else phase = undefined;
+      if (typeof body.customMessage !== 'string') {
+        res.status(400).json({ error: 'customMessage é obrigatório' });
+        return;
+      }
+      const customMessage = body.customMessage.trim();
+      if (customMessage.length === 0) {
+        res.status(400).json({ error: 'customMessage não pode ser vazio' });
+        return;
+      }
+      if (customMessage.length > 4096) {
+        res.status(400).json({ error: 'customMessage: no máximo 4096 caracteres' });
+        return;
+      }
+
+      if (attendanceIds.length === 0) {
+        res.status(400).json({ error: 'attendanceIds não pode ser vazio' });
+        return;
+      }
+      if (attendanceIds.length > 500) {
+        res.status(400).json({ error: 'No máximo 500 atendimentos por pedido' });
+        return;
+      }
+
+      const sellerRepo = AppDataSource.getRepository(Seller);
+      const sellers = await getSellersBySupervisorId(sellerRepo, supervisorId as string, { withUser: false });
+      const supervisedSellerIds = sellers.map((s) => String(s.id));
+
+      const svc = new AttendanceInactivityService();
+      const result = await svc.sendManualFollowUpsForSupervisor({
+        supervisorId: supervisorId as string,
+        supervisedSellerIds,
+        attendanceIds,
+        phase,
+        customMessage,
+      });
+
+      res.json({ success: true, ...result });
+    } catch (error: any) {
+      logger.error('Error sending manual follow-ups', {
         error: error.message,
         supervisorId: (req as any).user?.sub,
       });
@@ -3243,6 +3518,8 @@ export class AttendanceController {
           interventionType?: string;
           sellerId?: string;
           sellerSubdivision?: string;
+          /** ID do atalho na sidebar personalizada (Entrada): fila virtual só desse atalho */
+          customSidebarNodeId?: string;
         };
       };
       const target = body?.target;
@@ -3250,6 +3527,10 @@ export class AttendanceController {
         res.status(400).json({ error: 'target.kind é obrigatório' });
         return;
       }
+
+      const customLaneRaw =
+        typeof target.customSidebarNodeId === 'string' ? target.customSidebarNodeId.trim() : '';
+      const SUPERVISOR_CUSTOM_LANE_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
       const attendanceRepo = AppDataSource.getRepository(Attendance);
       const sellerRepo = AppDataSource.getRepository(Seller);
@@ -3367,6 +3648,16 @@ export class AttendanceController {
         res.status(400).json({ error: 'target.kind inválido' });
         return;
       }
+
+      const aiCtxMerge = { ...(attendance.aiContext ?? {}) } as Record<string, unknown>;
+      if (target.kind === 'vendedor') {
+        delete aiCtxMerge.supervisorCustomSidebarNodeId;
+      } else if (customLaneRaw && SUPERVISOR_CUSTOM_LANE_ID_RE.test(customLaneRaw)) {
+        aiCtxMerge.supervisorCustomSidebarNodeId = customLaneRaw;
+      } else {
+        delete aiCtxMerge.supervisorCustomSidebarNodeId;
+      }
+      attendance.aiContext = aiCtxMerge;
 
       attendance.updatedAt = new Date();
       await attendanceRepo.save(attendance);

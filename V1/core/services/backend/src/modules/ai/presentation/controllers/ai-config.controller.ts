@@ -103,6 +103,10 @@ export class AIConfigController {
     // Divisões / subdivisões — nomes e cores na entrada (supervisor)
     this.router.get('/division-subdivision-ui', this.getDivisionSubdivisionUi.bind(this));
     this.router.put('/division-subdivision-ui', this.mergeDivisionSubdivisionUi.bind(this));
+
+    // Atalhos hierárquicos personalizáveis na entrada (supervisor)
+    this.router.get('/supervisor-sidebar-custom', this.getSupervisorSidebarCustom.bind(this));
+    this.router.put('/supervisor-sidebar-custom', this.replaceSupervisorSidebarCustom.bind(this));
   }
 
   private async getAgentPrompt(req: Request, res: Response): Promise<void> {
@@ -1690,6 +1694,52 @@ export class AIConfigController {
       res.status(400).json({
         success: false,
         error: error.message || 'Erro ao guardar aparência das divisões',
+      });
+    }
+  }
+
+  /**
+   * GET /ai/config/supervisor-sidebar-custom
+   */
+  private async getSupervisorSidebarCustom(req: Request, res: Response): Promise<void> {
+    try {
+      const data = await aiConfigService.getSupervisorSidebarCustom();
+      res.json({ success: true, data });
+    } catch (error: any) {
+      logger.error('Error in getSupervisorSidebarCustom', { error: error.message });
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erro ao buscar atalhos da entrada',
+      });
+    }
+  }
+
+  /**
+   * PUT /ai/config/supervisor-sidebar-custom
+   */
+  private async replaceSupervisorSidebarCustom(req: Request, res: Response): Promise<void> {
+    try {
+      const userRole = (req as any).user?.role as UserRole;
+      const canEdit =
+        userRole === UserRole.SUPERVISOR ||
+        userRole === UserRole.ADMIN_GENERAL ||
+        userRole === UserRole.SUPER_ADMIN;
+      if (!canEdit) {
+        res.status(403).json({
+          success: false,
+          error: 'Apenas supervisores ou administradores podem alterar atalhos da entrada',
+        });
+        return;
+      }
+
+      const body = req.body as { nodes?: unknown };
+      const result = await aiConfigService.replaceSupervisorSidebarCustom(body?.nodes ?? []);
+      res.json({ success: true, data: result });
+    } catch (error: any) {
+      logger.error('Error in replaceSupervisorSidebarCustom', { error: error.message });
+      res.status(400).json({
+        success: false,
+        error: error.message || 'Erro ao guardar atalhos da entrada',
       });
     }
   }

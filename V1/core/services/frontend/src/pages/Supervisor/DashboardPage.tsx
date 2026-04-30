@@ -6,7 +6,7 @@ import { AudioRecorder } from '../../components/Chat/AudioRecorder';
 import { EmojiPicker } from '../../components/Chat/EmojiPicker';
 import { TypingIndicator } from '../../components/Chat/TypingIndicator';
 import { userService } from '../../services/user.service';
-import { attendanceService, Conversation, Message, ContactHistoryAttendance } from '../../services/attendance.service';
+import { attendanceService, Conversation, Message, ContactHistoryAttendance, type ManualFollowUpCandidateDto } from '../../services/attendance.service';
 import { socketService } from '../../services/socket.service';
 import { useNotifications } from '../../contexts/NotificationContext';
 import { quoteService, type QuoteRequest } from '../../services/quote.service';
@@ -14,15 +14,67 @@ import { mediaService } from '../../services/media.service';
 import toast from 'react-hot-toast';
 import { contactsService, type Contact, type WhatsAppNumberInfo } from '../../services/contacts.service';
 import { UserRole } from '../../types';
-import { aiConfigService, type DivisionSubdivisionUiEntry } from '../../services/ai-config.service';
+import { aiConfigService, type DivisionSubdivisionUiEntry, type SupervisorSidebarCustomNode } from '../../services/ai-config.service';
+import { SupervisorCustomSidebarSection } from '../../components/Supervisor/SupervisorCustomSidebarSection';
+import { SupervisorFollowUpTab } from '../../components/Supervisor/SupervisorFollowUpTab';
 import { DivisionSubdivisionUiModal } from '../../components/SuperAdmin/DivisionSubdivisionUiModal';
 import { getDivisionUiDefaultLabel } from '../../constants/divisionUiDefinitions';
+import { SUPERVISOR_DRAG_ATTENDANCE_MIME } from '../../constants/supervisorSidebarCustomNav';
+import {
+  loadSupervisorFollowUpSession,
+  countManualFollowUpPendingContacts,
+  type SupervisorManualFollowUpSessionState,
+} from '../../utils/supervisorFollowUpSession';
+
+function supervisorManualFollowUpCandidateToConversation(c: ManualFollowUpCandidateDto): Conversation {
+  return {
+    id: c.attendanceId as Conversation['id'],
+    clientPhone: c.clientPhone,
+    clientName: c.clientName,
+    lastMessage: (c.messagePreview ?? '').slice(0, 140),
+    lastMessageTime: c.lastClientMessageAt,
+    unread: 0,
+    state: 'OPEN',
+    handledBy: 'AI',
+    createdAt: c.lastClientMessageAt,
+    updatedAt: c.lastClientMessageAt,
+    followUpPhase: 'Aguardando',
+  };
+}
+
+function conversationsFromSupervisorManualFollowUpSent(sess: SupervisorManualFollowUpSessionState): Conversation[] {
+  const ordered = [...sess.sent].sort(
+    (a, b) => new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime()
+  );
+  const seen = new Set<string>();
+  const out: Conversation[] = [];
+  for (const job of ordered) {
+    for (const c of job.contacts) {
+      if (seen.has(c.attendanceId)) continue;
+      seen.add(c.attendanceId);
+      out.push({
+        id: c.attendanceId as Conversation['id'],
+        clientPhone: c.clientPhone,
+        clientName: c.clientName,
+        lastMessage: (job.message ?? '').slice(0, 140),
+        lastMessageTime: job.sentAt,
+        unread: 0,
+        state: 'OPEN',
+        handledBy: 'AI',
+        createdAt: job.sentAt,
+        updatedAt: job.sentAt,
+        followUpPhase: 'Enviado',
+      });
+    }
+  }
+  return out;
+}
 
 type VehicleBrand = 'FORD' | 'GM' | 'VW' | 'FIAT' | 'IMPORTADOS';
 
 /** Categorias de serviço (substituem marcas de veículos) */
 type ServiceCategory = 'PROTESE_CAPILAR' | 'MANUTENCAO' | 'OUTROS_ASSUNTOS';
-type FollowUpNode = 'follow-up' | 'inativo-1h' | 'inativo-12h' | 'inativo-24h';
+type FollowUpNode = 'manual-pending' | 'manual-sent';
 const SERVICE_CATEGORIES: { key: ServiceCategory; label: string; icon: string }[] = [
   { key: 'PROTESE_CAPILAR', label: 'Prótese capilar', icon: 'spa' },
   { key: 'MANUTENCAO', label: 'Manutenção', icon: 'build' },
@@ -35,10 +87,28 @@ const CATEGORY_TO_BRANDS: Record<ServiceCategory, VehicleBrand[]> = {
   OUTROS_ASSUNTOS: ['VW', 'FIAT', 'IMPORTADOS'],
 };
 const FOLLOW_UP_LABELS: Record<FollowUpNode, string> = {
-  'follow-up': 'Follow UP',
-  'inativo-1h': 'Aguardando 1º Follow up',
-  'inativo-12h': 'Aguardando 2º Follow up',
-  'inativo-24h': 'Aguardando',
+  'manual-pending': 'Aguardando follow up',
+  'manual-sent': 'Follow up enviado',
+};
+/** Destinos `demanda-*` / `demandas-all` na barra personalizada → subdivisão interna */
+const SUPERVISOR_DEMANDA_TARGET_TO_SUB: Record<string, string> = {
+  'demandas-all': '__all__',
+  'demanda-pedidos-orcamentos': 'pedidos-orcamentos',
+  'demanda-perguntas-pos-orcamento': 'perguntas-pos-orcamento',
+  'demanda-confirmacao-pix': 'confirmacao-pix',
+  'demanda-tirar-pedido': 'tirar-pedido',
+  'demanda-informacoes-entrega': 'informacoes-entrega',
+  'demanda-encomendas': 'encomendas',
+  'demanda-cliente-pediu-humano': 'cliente-pediu-humano',
+};
+/** Destinos da barra personalizada → divisões follow-up manual na Entrada */
+const SUPERVISOR_FOLLOW_CUSTOM_MAP: Record<string, FollowUpNode> = {
+  'follow-up-root': 'manual-pending',
+  'follow-up-manual-pending': 'manual-pending',
+  'follow-up-manual-sent': 'manual-sent',
+  'follow-up-inativo-1h': 'manual-pending',
+  'follow-up-inativo-12h': 'manual-pending',
+  'follow-up-inativo-24h': 'manual-pending',
 };
 /** Mapeamento serviço -> interventionType (quando filtro Intervenção humana está ativo) */
 const SERVICE_TO_INTERVENTION: Record<ServiceCategory, string | string[]> = {
@@ -46,8 +116,6 @@ const SERVICE_TO_INTERVENTION: Record<ServiceCategory, string | string[]> = {
   MANUTENCAO: 'demanda-telefone-fixo',
   OUTROS_ASSUNTOS: ['outros-assuntos'],
 };
-
-const SUPERVISOR_DRAG_ATTENDANCE_MIME = 'application/x-supervisor-attendance-id';
 
 /** Chips para soltar conversa nas subdivisões do vendedor selecionado */
 const SUPERVISOR_SELLER_DROP_SUBS: { key: string; shortLabel: string }[] = [
@@ -152,8 +220,8 @@ const getCategoryLabelForBrand = (brand: VehicleBrand): string => {
   }
   return String(brand);
 };
-type SupervisorTab = 'chat' | 'estatisticas' | 'contatos';
-const SUPERVISOR_TAB_ORDER: SupervisorTab[] = ['chat', 'estatisticas', 'contatos'];
+type SupervisorTab = 'chat' | 'followup' | 'estatisticas' | 'contatos';
+const SUPERVISOR_TAB_ORDER: SupervisorTab[] = ['chat', 'followup', 'estatisticas', 'contatos'];
 /** Retorna classes de translate (GPU: translate3d): mobile X, desktop Y. Usa classes CSS otimizadas para transição fluida. */
 function getSupervisorTabSlideClass(panelTab: SupervisorTab, activeTab: SupervisorTab): string {
   const pi = SUPERVISOR_TAB_ORDER.indexOf(panelTab);
@@ -240,7 +308,7 @@ export const SupervisorDashboard: React.FC = () => {
   const [selectedContactsForBulk, setSelectedContactsForBulk] = useState<Set<string>>(new Set());
   const [isDeletingContactsBulk, setIsDeletingContactsBulk] = useState(false);
   const [customerSidebarOpen, setCustomerSidebarOpen] = useState(true);
-  const [selectedAttendanceFilter, setSelectedAttendanceFilter] = useState<string>('abertos');
+  const [selectedAttendanceFilter, setSelectedAttendanceFilter] = useState<string>('todas-entrada');
   /** true = view "Intervenção humana" (todas intervenções com badge por serviço); false = view de serviços (vendedores) */
   const [viewingIntervencaoHumana, setViewingIntervencaoHumana] = useState<boolean>(false);
   const [selectedNaoAtribuidosFilter, setSelectedNaoAtribuidosFilter] = useState<'todos' | 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao'>('todos');
@@ -258,6 +326,8 @@ export const SupervisorDashboard: React.FC = () => {
   const [supervisorBrands, setSupervisorBrands] = useState<VehicleBrand[]>([]);
   const [selectedServiceCategory, setSelectedServiceCategory] = useState<ServiceCategory | null>(null);
   const [selectedFollowUpNode, setSelectedFollowUpNode] = useState<FollowUpNode | null>(null);
+  /** Incrementado quando a sessão de follow-up manual (sessionStorage) muda — atualiza contadores e listas. */
+  const [followUpSessionRev, setFollowUpSessionRev] = useState(0);
   /** Destaque visual em zonas de drop ao arrastar conversa na Entrada */
   const [supervisorDropHoverKey, setSupervisorDropHoverKey] = useState<string | null>(null);
   const [supervisorSellers, setSupervisorSellers] = useState<Seller[]>([]);
@@ -733,7 +803,7 @@ export const SupervisorDashboard: React.FC = () => {
       const newConv = { ...(result.conversation as Conversation), id: result.attendanceId };
       if (result.isNew) pendingChamarConversationRef.current = newConv;
       handleSupervisorTabChange('chat');
-      setSelectedAttendanceFilter('abertos');
+      setSelectedAttendanceFilter('todas-entrada');
       setSelectedConversation(result.attendanceId);
       setSelectedConversationData(result.conversation as Conversation);
       setSidebarDetailsReady(true);
@@ -1046,6 +1116,29 @@ export const SupervisorDashboard: React.FC = () => {
     aiConfigService.getDivisionSubdivisionUi().then(setDivisionSubdivisionUi).catch(() => {});
   }, []);
 
+  const [customSidebarNodes, setCustomSidebarNodes] = useState<SupervisorSidebarCustomNode[]>([]);
+  const [supervisorCustomNavSelectedNodeId, setSupervisorCustomNavSelectedNodeId] = useState<string | null>(null);
+  /** Ref espelho do estado — atualizado no render para não ficar desfasado dos useEffects que correm antes dos que sincronizam refs. */
+  const supervisorCustomNavSelectedNodeIdRef = useRef<string | null>(null);
+  supervisorCustomNavSelectedNodeIdRef.current = supervisorCustomNavSelectedNodeId;
+
+  useEffect(() => {
+    aiConfigService.getSupervisorSidebarCustom().then((d) => setCustomSidebarNodes(d.nodes)).catch(() => {});
+  }, []);
+
+  const clearSupervisorCustomNavSelection = useCallback(() => setSupervisorCustomNavSelectedNodeId(null), []);
+
+  const persistSupervisorCustomSidebar = async (next: SupervisorSidebarCustomNode[]) => {
+    try {
+      const r = await aiConfigService.replaceSupervisorSidebarCustom(next);
+      setCustomSidebarNodes(r.nodes);
+      toast.success('Divisões personalizadas guardadas.');
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error ?? 'Erro ao guardar divisões personalizadas.');
+      throw e;
+    }
+  };
+
   const divisionUiLabel = useCallback(
     (key: string, fallback: string) => divisionSubdivisionUi[key]?.label?.trim() || fallback,
     [divisionSubdivisionUi]
@@ -1121,6 +1214,7 @@ export const SupervisorDashboard: React.FC = () => {
       }
     }
 
+    if (selectedAttendanceFilter === 'todas-entrada') return 'Todas';
     if (selectedAttendanceFilter === 'abertos') return divisionUiLabel('abertos', 'Abertos');
     if (selectedAttendanceFilter === 'nao-atribuidos') return divisionUiLabel('nao-atribuidos-ai', 'AI');
     if (selectedFollowUpNode) {
@@ -1181,9 +1275,11 @@ export const SupervisorDashboard: React.FC = () => {
   };
 
   /** Busca conversas de um serviço: vendedores + intervenções (visualização única, sem filtro on/off) */
-  const fetchServiceConversations = async (category: ServiceCategory) => {
+  const fetchServiceConversations = async (category: ServiceCategory, customNavLane?: string | null) => {
     setIsLoadingConversations(true);
     try {
+      const laneOpts =
+        customNavLane && customNavLane.trim() ? { customLane: customNavLane.trim() } : undefined;
       const sellersInCategory = getSellersByServiceCategory(category);
       const sellerIds = new Set(sellersInCategory.map((s) => s.id));
       const types = SERVICE_TO_INTERVENTION[category];
@@ -1191,7 +1287,7 @@ export const SupervisorDashboard: React.FC = () => {
 
       const [attributedList, ...interventionLists] = await Promise.all([
         attendanceService.getAttributedAttendances(),
-        ...interventionTypes.map((t) => attendanceService.getInterventionByType(t)),
+        ...interventionTypes.map((t) => attendanceService.getInterventionByType(t, laneOpts)),
       ]);
 
       const vendedorList =
@@ -1220,11 +1316,17 @@ export const SupervisorDashboard: React.FC = () => {
   };
 
   /** Busca todas as conversas de intervenção (view Intervenção humana) */
-  const fetchAllInterventionConversations = async () => {
+  const fetchAllInterventionConversations = async (customNavLane?: string | null) => {
     setIsLoadingConversations(true);
     try {
+      const laneOpts =
+        customNavLane && customNavLane.trim() ? { customLane: customNavLane.trim() } : undefined;
       const types = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'];
-      const lists = await Promise.all(types.map((t) => attendanceService.getInterventionByType(t)));
+      const lists = await Promise.all([
+        attendanceService.getInterventionDemandaTelefoneFixo(laneOpts),
+        attendanceService.getInterventionByType('protese-capilar', laneOpts),
+        attendanceService.getInterventionByType('outros-assuntos', laneOpts),
+      ]);
       const merged = lists.flatMap((list, i) =>
         list.map((c) => ({ ...c, interventionType: (c as any).interventionType ?? types[i] }))
       );
@@ -1238,7 +1340,7 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const handleSelectServiceCategory = (category: ServiceCategory) => {
+  const handleSelectServiceCategory = (category: ServiceCategory, customLaneForFetch?: string | null) => {
     if (selectedServiceCategory === category) return;
     setViewingIntervencaoHumana(false);
     setSelectedFollowUpNode(null);
@@ -1250,7 +1352,10 @@ export const SupervisorDashboard: React.FC = () => {
     setSelectedConversation(null);
     setConversations([]);
     setMobileChatLayer('conversations');
-    fetchServiceConversations(category);
+    fetchServiceConversations(
+      category,
+      customLaneForFetch !== undefined ? customLaneForFetch : null
+    );
   };
 
   const handleSelectFollowUpNode = (node: FollowUpNode) => {
@@ -1398,6 +1503,7 @@ export const SupervisorDashboard: React.FC = () => {
   }, [user?.id, user?.role, isPedidosOrcamentosView]);
 
   const handleSelectSeller = async (sellerId: string, subdivision?: string, brand?: VehicleBrand, fromDemandasCard?: boolean) => {
+    clearSupervisorCustomNavSelection();
     setViewingFromDemandasCard(fromDemandasCard ?? false);
     setSelectedSeller(sellerId);
     setSelectedSellerSubdivision(subdivision || null);
@@ -1461,14 +1567,21 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const fetchAbertosConversations = async (conversationToPrepend?: { id: string } & Record<string, unknown>) => {
+  const fetchAbertosConversations = async (
+    conversationToPrepend?: { id: string } & Record<string, unknown>,
+    opts?: { unassignedLane?: string | null }
+  ) => {
     const toPrepend = conversationToPrepend ?? pendingChamarConversationRef.current;
     if (toPrepend) pendingChamarConversationRef.current = null;
     setIsLoadingConversations(true);
     try {
+      const customLane =
+        opts?.unassignedLane !== undefined
+          ? opts.unassignedLane?.trim() || undefined
+          : supervisorCustomNavSelectedNodeIdRef.current?.trim() || undefined;
       const interventionTypes = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
       const [unassigned, attributed, demandaFixo, ...otherInterventions] = await Promise.all([
-        attendanceService.getUnassignedAttendances('todos'),
+        attendanceService.getUnassignedAttendances('todos', customLane),
         attendanceService.getAttributedAttendances(),
         attendanceService.getInterventionDemandaTelefoneFixo(),
         attendanceService.getInterventionByType('protese-capilar'),
@@ -1507,10 +1620,66 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const fetchUnassignedConversations = async (filter: 'todos' | 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao' = 'todos') => {
+  /** Vista fixa no topo: 100% das conversas (não atribuídos com todas as filas + atribuídos + intervenção + follow-up). */
+  const fetchTodasEntradaConversations = async (conversationToPrepend?: { id: string } & Record<string, unknown>) => {
+    const toPrepend = conversationToPrepend ?? pendingChamarConversationRef.current;
+    if (toPrepend) pendingChamarConversationRef.current = null;
     setIsLoadingConversations(true);
     try {
-      const fetchedConversations = await attendanceService.getUnassignedAttendances(filter);
+      const interventionTypes = ['demanda-telefone-fixo', 'protese-capilar', 'outros-assuntos'] as const;
+      const fuNodes = ['follow-up', 'inativo-1h', 'inativo-12h', 'inativo-24h'] as const;
+      const [unassigned, attributed, demandaFixo, ...otherInterventions] = await Promise.all([
+        attendanceService.getUnassignedAttendances('todos', undefined, { allLanes: true }),
+        attendanceService.getAttributedAttendances(),
+        attendanceService.getInterventionDemandaTelefoneFixo({ allLanes: true }),
+        attendanceService.getInterventionByType('protese-capilar', { allLanes: true }),
+        attendanceService.getInterventionByType('outros-assuntos', { allLanes: true }),
+      ]);
+      const fuLists = await Promise.all(
+        fuNodes.map((node) => attendanceService.getFollowUpAttendances(node, { allLanes: true }))
+      );
+      const interventionLists = [demandaFixo, ...otherInterventions];
+      const interventionMerged = interventionLists.flatMap((list, i) =>
+        list.map((c) => ({
+          ...c,
+          interventionType: (c as any).interventionType ?? interventionTypes[i],
+          attributionSource: {
+            type: 'intervention' as const,
+            label: INTERVENTION_TO_SERVICE_LABEL[interventionTypes[i]] ?? interventionTypes[i],
+            interventionType: interventionTypes[i],
+          },
+        }))
+      );
+      const seen = new Set<string>();
+      let merged = [...unassigned, ...attributed, ...interventionMerged, ...fuLists.flat()].filter((c) =>
+        seen.has(String(c.id)) ? false : (seen.add(String(c.id)), true)
+      );
+      if (toPrepend && !seen.has(String(toPrepend.id))) {
+        merged = [toPrepend as Conversation, ...merged];
+      }
+      const readIds = markedAsReadIdsRef.current;
+      const toSet = merged
+        .map((c) => (readIds.has(String(c.id)) ? { ...c, unread: 0 } : c))
+        .sort((a, b) => getConversationSortTimestamp(b) - getConversationSortTimestamp(a));
+      setConversations(toSet);
+    } catch (e: any) {
+      console.error('Error fetching todas entrada conversations', e);
+      const msg = e?.response?.data?.error || e?.message || 'Sem conexão com o servidor';
+      toast.error(`Erro ao carregar todas as conversas: ${typeof msg === 'string' ? msg : 'Tente novamente'}`);
+      setConversations([]);
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  };
+
+  const fetchUnassignedConversations = async (
+    filter: 'todos' | 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao' = 'todos',
+    customLane?: string | null
+  ) => {
+    setIsLoadingConversations(true);
+    try {
+      const lane = customLane?.trim() || undefined;
+      const fetchedConversations = await attendanceService.getUnassignedAttendances(filter, lane);
       const routedIds = routedAttendanceIdsRef.current;
       const readIds = markedAsReadIdsRef.current;
       const toSet = (routedIds.size > 0
@@ -1556,15 +1725,35 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
-  const fetchFollowUpConversations = async (node: FollowUpNode) => {
+  const fetchFollowUpConversations = async (node: FollowUpNode, _customNavLane?: string | null) => {
     setIsLoadingConversations(true);
     try {
-      const list = await attendanceService.getFollowUpAttendances(node);
-      const readIds = markedAsReadIdsRef.current;
-      const toSet = list
-        .map((c) => (readIds.has(String(c.id)) ? { ...c, unread: 0 } : c))
-        .sort((a, b) => getConversationSortTimestamp(b) - getConversationSortTimestamp(a));
-      setConversations(toSet);
+      if (node === 'manual-pending') {
+        const sess = loadSupervisorFollowUpSession();
+        const pendingIds = new Set(sess.pending.flatMap((j) => j.attendanceIds));
+        if (pendingIds.size === 0) {
+          setConversations([]);
+          return;
+        }
+        const candidates = await attendanceService.getManualFollowUpCandidates({});
+        const filtered = candidates.filter((c) => pendingIds.has(c.attendanceId));
+        const readIds = markedAsReadIdsRef.current;
+        const toSet = filtered
+          .map(supervisorManualFollowUpCandidateToConversation)
+          .map((c) => (readIds.has(String(c.id)) ? { ...c, unread: 0 } : c))
+          .sort((a, b) => getConversationSortTimestamp(b) - getConversationSortTimestamp(a));
+        setConversations(toSet);
+        return;
+      }
+      if (node === 'manual-sent') {
+        const sess = loadSupervisorFollowUpSession();
+        const readIds = markedAsReadIdsRef.current;
+        const toSet = conversationsFromSupervisorManualFollowUpSent(sess)
+          .map((c) => (readIds.has(String(c.id)) ? { ...c, unread: 0 } : c))
+          .sort((a, b) => getConversationSortTimestamp(b) - getConversationSortTimestamp(a));
+        setConversations(toSet);
+        return;
+      }
     } catch (error) {
       console.error('Error fetching follow-up conversations:', error);
       toast.error('Erro ao carregar conversas de follow-up.');
@@ -1573,6 +1762,12 @@ export const SupervisorDashboard: React.FC = () => {
       setIsLoadingConversations(false);
     }
   };
+
+  useEffect(() => {
+    const onSessionFollowUp = () => setFollowUpSessionRev((x) => x + 1);
+    window.addEventListener('supervisor-followup-session-changed', onSessionFollowUp);
+    return () => window.removeEventListener('supervisor-followup-session-changed', onSessionFollowUp);
+  }, []);
 
   const fetchInterventionDemandaTelefoneFixo = async () => {
     setIsLoadingConversations(true);
@@ -1673,7 +1868,18 @@ export const SupervisorDashboard: React.FC = () => {
 
   // Efeito para carregar conversas não atribuídas ou atribuídas quando o filtro é selecionado
   useEffect(() => {
-    if (selectedAttendanceFilter === 'abertos') {
+    if (selectedAttendanceFilter === 'todas-entrada') {
+      setSelectedSeller(null);
+      setSelectedSellerBrand(null);
+      setSelectedTodasDemandasSubdivision(null);
+      setSelectedFechadosFilter(false);
+      setViewingIntervencaoHumana(false);
+      setSelectedServiceCategory(null);
+      setSelectedFollowUpNode(null);
+      setSearchTerm('');
+      setConversations([]);
+      fetchTodasEntradaConversations();
+    } else if (selectedAttendanceFilter === 'abertos') {
       setSelectedSeller(null);
       setSelectedSellerBrand(null);
       setSelectedTodasDemandasSubdivision(null);
@@ -1682,7 +1888,7 @@ export const SupervisorDashboard: React.FC = () => {
       setSelectedServiceCategory(null);
       setSearchTerm('');
       setConversations([]);
-      fetchAbertosConversations();
+      fetchAbertosConversations(undefined, { unassignedLane: supervisorCustomNavSelectedNodeId });
     } else if (selectedAttendanceFilter === 'nao-atribuidos') {
       setSelectedSeller(null);
       setSelectedSellerBrand(null);
@@ -1690,7 +1896,7 @@ export const SupervisorDashboard: React.FC = () => {
       setSelectedFechadosFilter(false);
       setSearchTerm('');
       setConversations([]);
-      fetchUnassignedConversations(selectedNaoAtribuidosFilter);
+      fetchUnassignedConversations(selectedNaoAtribuidosFilter, supervisorCustomNavSelectedNodeId);
     } else if (selectedFechadosFilter) {
       setSelectedSeller(null);
       setSelectedSellerBrand(null);
@@ -1705,18 +1911,28 @@ export const SupervisorDashboard: React.FC = () => {
       setSelectedTodasDemandasSubdivision(null);
       setSearchTerm('');
       setConversations([]);
-      fetchFollowUpConversations(selectedFollowUpNode);
+      fetchFollowUpConversations(selectedFollowUpNode, supervisorCustomNavSelectedNodeId);
     } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedTodasDemandasSubdivision && selectedServiceCategory) {
       setSearchTerm('');
-      fetchServiceConversations(selectedServiceCategory);
+      fetchServiceConversations(selectedServiceCategory, supervisorCustomNavSelectedNodeId);
     } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedTodasDemandasSubdivision && !selectedServiceCategory && viewingIntervencaoHumana) {
       setSearchTerm('');
-      fetchAllInterventionConversations();
+      fetchAllInterventionConversations(supervisorCustomNavSelectedNodeId);
     } else if (!selectedSeller && selectedAttendanceFilter === 'tudo' && !selectedTodasDemandasSubdivision && !selectedServiceCategory) {
       setSearchTerm('');
       fetchAttributedConversations();
     }
-  }, [selectedAttendanceFilter, selectedNaoAtribuidosFilter, selectedTodasDemandasSubdivision, selectedFechadosFilter, selectedServiceCategory, viewingIntervencaoHumana, selectedFollowUpNode]);
+  }, [
+    selectedAttendanceFilter,
+    selectedNaoAtribuidosFilter,
+    selectedTodasDemandasSubdivision,
+    selectedFechadosFilter,
+    selectedServiceCategory,
+    viewingIntervencaoHumana,
+    selectedFollowUpNode,
+    supervisorCustomNavSelectedNodeId,
+    followUpSessionRev,
+  ]);
 
   // Clear search when seller changes
   useEffect(() => {
@@ -1763,7 +1979,9 @@ export const SupervisorDashboard: React.FC = () => {
   /** Atualiza posição do indicador deslizante quando a divisão selecionada muda */
   const updateSlidingIndicator = useCallback(() => {
     const container = entryNavInnerRef.current;
-    const active = container?.querySelector<HTMLElement>('[data-division-active]');
+    const active =
+      container?.querySelector<HTMLElement>('[data-custom-division-active]') ??
+      container?.querySelector<HTMLElement>('[data-division-active]');
     if (!container || !active) {
       setSlidingIndicatorRect(null);
       return;
@@ -1798,6 +2016,7 @@ export const SupervisorDashboard: React.FC = () => {
     selectedSeller,
     selectedSellerSubdivision,
     expandedTodasDemandas,
+    supervisorCustomNavSelectedNodeId,
   ]);
 
   /** Atualiza posição do indicador deslizante na barra lateral (abas Chat, Estatísticas, Contatos) */
@@ -1967,6 +2186,7 @@ export const SupervisorDashboard: React.FC = () => {
         selectedFechadosFilter,
         selectedSeller,
         selectedSellerSubdivision,
+        supervisorCustomNavSelectedNodeId,
       ].join('|'),
     [
       selectedAttendanceFilter,
@@ -1978,6 +2198,7 @@ export const SupervisorDashboard: React.FC = () => {
       selectedFechadosFilter,
       selectedSeller,
       selectedSellerSubdivision,
+      supervisorCustomNavSelectedNodeId,
     ]
   );
 
@@ -1998,7 +2219,7 @@ export const SupervisorDashboard: React.FC = () => {
   };
 
   /** Recarrega a lista de conversas da vista atual após mover fila/subdivisão (mantém filtros). */
-  async function refreshConversationPanelAfterMove() {
+  async function refreshConversationPanelAfterMove(opts?: { droppedLane?: string | null }) {
     const af = selectedAttendanceFilterRef.current;
     const nf = selectedNaoAtribuidosFilterRef.current;
     const seller = selectedSellerRef.current;
@@ -2014,15 +2235,27 @@ export const SupervisorDashboard: React.FC = () => {
       return;
     }
     if (fu) {
-      await fetchFollowUpConversations(fu);
+      await fetchFollowUpConversations(fu, supervisorCustomNavSelectedNodeIdRef.current);
+      return;
+    }
+    if (af === 'todas-entrada') {
+      await fetchTodasEntradaConversations();
       return;
     }
     if (af === 'abertos') {
-      await fetchAbertosConversations();
+      const lane =
+        opts?.droppedLane != null && String(opts.droppedLane).trim()
+          ? String(opts.droppedLane).trim()
+          : supervisorCustomNavSelectedNodeIdRef.current?.trim() || undefined;
+      await fetchAbertosConversations(undefined, { unassignedLane: lane });
       return;
     }
     if (af === 'nao-atribuidos') {
-      await fetchUnassignedConversations(nf);
+      const lane =
+        opts && 'droppedLane' in opts
+          ? opts.droppedLane?.trim() || undefined
+          : supervisorCustomNavSelectedNodeIdRef.current?.trim() || undefined;
+      await fetchUnassignedConversations(nf, lane);
       return;
     }
     if (seller) {
@@ -2123,11 +2356,11 @@ export const SupervisorDashboard: React.FC = () => {
       return;
     }
     if (af === 'tudo' && svc) {
-      await fetchServiceConversations(svc);
+      await fetchServiceConversations(svc, supervisorCustomNavSelectedNodeIdRef.current);
       return;
     }
     if (af === 'tudo' && viewingIv && !svc) {
-      await fetchAllInterventionConversations();
+      await fetchAllInterventionConversations(supervisorCustomNavSelectedNodeIdRef.current);
       return;
     }
     if (af === 'tudo') {
@@ -2140,20 +2373,34 @@ export const SupervisorDashboard: React.FC = () => {
     target:
       | { kind: 'nao_atribuidos'; bucket: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao' }
       | { kind: 'intervencao'; interventionType: 'demanda-telefone-fixo' | 'protese-capilar' | 'outros-assuntos' }
-      | { kind: 'vendedor'; sellerId: string; sellerSubdivision: string }
-  ) => {
+      | { kind: 'vendedor'; sellerId: string; sellerSubdivision: string },
+    customSidebarNodeId?: string | null
+  ): Promise<boolean> => {
     e.preventDefault();
     setSupervisorDropHoverKey(null);
     const id = e.dataTransfer.getData(SUPERVISOR_DRAG_ATTENDANCE_MIME);
-    if (!id) return;
+    if (!id) return false;
     try {
-      await attendanceService.supervisorMoveQueue(id, target);
+      const lane = customSidebarNodeId?.trim();
+      const payload =
+        lane && target.kind !== 'vendedor'
+          ? ({ ...target, customSidebarNodeId: lane } as Parameters<typeof attendanceService.supervisorMoveQueue>[1])
+          : target;
+      await attendanceService.supervisorMoveQueue(id, payload);
       toast.success('Conversa movida.');
       await fetchSubdivisionCounts({ bust: true });
-      await refreshConversationPanelAfterMove();
+      await refreshConversationPanelAfterMove(
+        selectedAttendanceFilterRef.current === 'nao-atribuidos'
+          ? { droppedLane: customSidebarNodeId?.trim() ?? null }
+          : customSidebarNodeId?.trim()
+            ? { droppedLane: customSidebarNodeId.trim() }
+            : undefined
+      );
+      return true;
     } catch (err: any) {
       const msg = err?.response?.data?.error;
       toast.error(typeof msg === 'string' ? msg : 'Não foi possível mover a conversa.');
+      return false;
     }
   };
 
@@ -2423,9 +2670,10 @@ export const SupervisorDashboard: React.FC = () => {
 
             // Refetch "Não Atribuídos" para garantir que some de Todos/todas subdivisões
             if (selectedAttendanceFilterRef.current === 'nao-atribuidos') {
-              fetchUnassignedConversations(selectedNaoAtribuidosFilterRef.current).catch((e) =>
-                console.error('Error refetching unassigned after fallback route', e)
-              );
+              fetchUnassignedConversations(
+                selectedNaoAtribuidosFilterRef.current,
+                supervisorCustomNavSelectedNodeIdRef.current
+              ).catch((e) => console.error('Error refetching unassigned after fallback route', e));
             }
           }
         }
@@ -2762,10 +3010,12 @@ export const SupervisorDashboard: React.FC = () => {
         }
         
         fetchSubdivisionCounts();
-        // Quando cliente responde, o follow-up é resetado no backend. Se estamos em follow-up, recarregar a lista
-        // para o card aparecer na coluna correta (ex.: Aguardando 1º) imediatamente.
+        // Quando cliente responde, o follow-up é resetado no backend. Recarrega lista nas divisões follow-up manual.
         if (isClient && selectedFollowUpNodeRef.current) {
-          fetchFollowUpConversations(selectedFollowUpNodeRef.current).catch((e) =>
+          fetchFollowUpConversations(
+            selectedFollowUpNodeRef.current,
+            supervisorCustomNavSelectedNodeIdRef.current
+          ).catch((e) =>
             console.error('Error refreshing follow-up after client message', e)
           );
         }
@@ -3123,9 +3373,24 @@ export const SupervisorDashboard: React.FC = () => {
           // Refetch "Não Atribuídos" (Todos/Triagem/etc.) para garantir que o roteado
           // suma de todas as subdivisões, incluindo "Todos" (evita badge Triagem em Todos)
           try {
-            await fetchUnassignedConversations(selectedNaoAtribuidosFilterRef.current);
+            await fetchUnassignedConversations(
+              selectedNaoAtribuidosFilterRef.current,
+              supervisorCustomNavSelectedNodeIdRef.current
+            );
           } catch (e) {
             console.error('Error refetching unassigned after route', e);
+          }
+        } else if (selectedAttendanceFilterRef.current === 'todas-entrada') {
+          try {
+            await fetchTodasEntradaConversations();
+          } catch (e) {
+            console.error('Error refetching todas-entrada after route', e);
+          }
+        } else if (selectedAttendanceFilterRef.current === 'abertos') {
+          try {
+            await fetchAbertosConversations();
+          } catch (e) {
+            console.error('Error refetching abertos after route', e);
           }
         }
 
@@ -3288,7 +3553,7 @@ export const SupervisorDashboard: React.FC = () => {
                 setViewingIntervencaoHumana(true);
                 updateCardData();
               });
-              fetchAllInterventionConversations();
+              fetchAllInterventionConversations(supervisorCustomNavSelectedNodeIdRef.current);
               return;
             }
             if (!isViewing) {
@@ -3299,7 +3564,7 @@ export const SupervisorDashboard: React.FC = () => {
             startTransition(() => {
               if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
               if (viewingIntervencaoHumanaRef.current) {
-                fetchAllInterventionConversations();
+                fetchAllInterventionConversations(supervisorCustomNavSelectedNodeIdRef.current);
               }
             });
             if (processedRelocationsRef.current.size > 100) {
@@ -3334,11 +3599,12 @@ export const SupervisorDashboard: React.FC = () => {
                 setSelectedNaoAtribuidosFilter(subFilter);
                 updateCardData();
               });
-              fetchUnassignedConversations(subFilter);
+              fetchUnassignedConversations(subFilter, supervisorCustomNavSelectedNodeIdRef.current);
             } else {
               startTransition(() => {
                 if (selectedAttendanceFilterRef.current === 'nao-atribuidos') removeFromUnassigned();
-                if (selectedNaoAtribuidosFilterRef.current === subFilter) fetchUnassignedConversations(subFilter);
+                if (selectedNaoAtribuidosFilterRef.current === subFilter)
+                  fetchUnassignedConversations(subFilter, supervisorCustomNavSelectedNodeIdRef.current);
               });
             }
           }
@@ -3639,17 +3905,22 @@ export const SupervisorDashboard: React.FC = () => {
         // Priorizar follow-up quando em visualização de follow-up (ref para valor atual)
         const followUpNode = selectedFollowUpNodeRef.current;
         if (followUpNode) {
-          fetchFollowUpConversations(followUpNode).catch((e) =>
+          fetchFollowUpConversations(followUpNode, supervisorCustomNavSelectedNodeIdRef.current).catch((e) =>
             console.error('Error refreshing follow-up after subdivision_counts_changed', e)
+          );
+        } else if (selectedAttendanceFilterRef.current === 'todas-entrada') {
+          fetchTodasEntradaConversations().catch((e) =>
+            console.error('Error refreshing todas-entrada after subdivision_counts_changed', e)
           );
         } else if (selectedAttendanceFilterRef.current === 'abertos') {
           fetchAbertosConversations().catch((e) =>
             console.error('Error refreshing abertos after subdivision_counts_changed', e)
           );
         } else if (selectedAttendanceFilterRef.current === 'nao-atribuidos') {
-          fetchUnassignedConversations(selectedNaoAtribuidosFilterRef.current).catch((e) =>
-            console.error('Error refreshing nao-atribuidos after subdivision_counts_changed', e)
-          );
+          fetchUnassignedConversations(
+            selectedNaoAtribuidosFilterRef.current,
+            supervisorCustomNavSelectedNodeIdRef.current
+          ).catch((e) => console.error('Error refreshing nao-atribuidos after subdivision_counts_changed', e));
         }
       };
       socketService.on('subdivision_counts_changed', handleSubdivisionCountsChanged);
@@ -4647,6 +4918,9 @@ export const SupervisorDashboard: React.FC = () => {
     }
   };
 
+  /** Destaque da linha “Abertos” e ramo AI (não inclui “Todas”, que é item irmão acima). */
+  const abertosTreeRowHighlight =
+    (selectedAttendanceFilter === 'abertos' || selectedAttendanceFilter === 'nao-atribuidos') && !selectedFechadosFilter;
   const isOpenTreeActive =
     (selectedAttendanceFilter === 'abertos' ||
       selectedAttendanceFilter === 'nao-atribuidos' ||
@@ -4661,12 +4935,12 @@ export const SupervisorDashboard: React.FC = () => {
     activeSupervisorTab === 'chat' &&
     !isBulkSelectMode &&
     !selectedFechadosFilter &&
-    !selectedFollowUpNode &&
+    (!selectedFollowUpNode || selectedAttendanceFilter === 'todas-entrada') &&
     !isPedidosOrcamentosView &&
     !selectedTodasDemandasSubdivision;
   const isInterventionNodeActive = (viewingIntervencaoHumana || !!selectedServiceCategory) && !selectedFechadosFilter;
   const isFirstBranchActive = isAiNodeActive || isInterventionNodeActive;
-  const firstBranchLineClass = isOpenTreeActive
+  const firstBranchLineClass = abertosTreeRowHighlight
     ? 'border-sky-400 dark:border-sky-500'
     : 'border-slate-200 dark:border-slate-700';
   const firstBranchSymbolClass = isFirstBranchActive
@@ -4676,24 +4950,125 @@ export const SupervisorDashboard: React.FC = () => {
     ? 'border-sky-400 dark:border-sky-500'
     : 'border-slate-200 dark:border-slate-700';
   const isFechadosActive = selectedFechadosFilter;
-  const isFollowUpPathActive =
-    selectedFollowUpNode === 'follow-up' ||
-    selectedFollowUpNode === 'inativo-1h' ||
-    selectedFollowUpNode === 'inativo-12h' ||
-    selectedFollowUpNode === 'inativo-24h';
-  const isFollowUp1hPathActive =
-    selectedFollowUpNode === 'inativo-1h' ||
-    selectedFollowUpNode === 'inativo-12h' ||
-    selectedFollowUpNode === 'inativo-24h';
-  const isFollowUp12hPathActive =
-    selectedFollowUpNode === 'inativo-12h' ||
-    selectedFollowUpNode === 'inativo-24h';
-  const isFollowUp24hPathActive = selectedFollowUpNode === 'inativo-24h';
-  const closedTreeLineClass = selectedFollowUpNode
-    ? 'border-sky-400 dark:border-sky-500'
-    : 'border-slate-200 dark:border-slate-700';
-  const closedTreeSymbolDefault = 'text-slate-300 dark:text-slate-600';
-  const closedTreeSymbolActive = 'text-sky-600 dark:text-sky-400';
+
+  const manualFollowUpSidebarCounts = useMemo(() => {
+    const fu = loadSupervisorFollowUpSession();
+    return {
+      pendingJobs: fu.pending.length,
+      pendingContacts: countManualFollowUpPendingContacts(fu),
+      sentJobs: fu.sent.length,
+    };
+  }, [followUpSessionRev]);
+
+  const navigateSupervisorCustomTarget = (targetId: string, customRowNodeId: string) => {
+    setSupervisorCustomNavSelectedNodeId(customRowNodeId);
+    setSelectedConversation(null);
+
+    const clearSeller = () => {
+      setSelectedSeller(null);
+      setSelectedSellerBrand(null);
+      setSelectedSellerSubdivision(null);
+    };
+
+    if (targetId === 'abertos') {
+      clearSeller();
+      setSelectedAttendanceFilter('abertos');
+      setViewingIntervencaoHumana(false);
+      setSelectedServiceCategory(null);
+      setSelectedNaoAtribuidosFilter('todos');
+      setSelectedFechadosFilter(false);
+      setSelectedFollowUpNode(null);
+      setSelectedTodasDemandasSubdivision(null);
+      setSelectedDemandaKey(null);
+      setPendingQuotes([]);
+      setMobileChatLayer('conversations');
+      return;
+    }
+
+    if (targetId === 'nao-atribuidos-todos') {
+      handleSelectNaoAtribuidos();
+      return;
+    }
+
+    if (
+      targetId === 'nao-atribuidos-triagem' ||
+      targetId === 'nao-atribuidos-encaminhados-ecommerce' ||
+      targetId === 'nao-atribuidos-encaminhados-balcao'
+    ) {
+      clearSeller();
+      setSelectedServiceCategory(null);
+      setViewingIntervencaoHumana(false);
+      setSelectedTodasDemandasSubdivision(null);
+      setSelectedDemandaKey(null);
+      setSelectedFechadosFilter(false);
+      setSelectedFollowUpNode(null);
+      setSelectedAttendanceFilter('nao-atribuidos');
+      const sub =
+        targetId === 'nao-atribuidos-triagem'
+          ? 'triagem'
+          : targetId === 'nao-atribuidos-encaminhados-ecommerce'
+            ? 'encaminhados-ecommerce'
+            : 'encaminhados-balcao';
+      setSelectedNaoAtribuidosFilter(sub);
+      setMobileChatLayer('conversations');
+      return;
+    }
+
+    if (targetId === 'intervencao-humana-root') {
+      clearSeller();
+      setViewingIntervencaoHumana(true);
+      setSelectedServiceCategory(null);
+      setSelectedAttendanceFilter('tudo');
+      setSelectedFechadosFilter(false);
+      setSelectedFollowUpNode(null);
+      setSelectedTodasDemandasSubdivision(null);
+      setSelectedDemandaKey(null);
+      setPendingQuotes([]);
+      setMobileChatLayer('conversations');
+      return;
+    }
+
+    if (targetId.startsWith('service-')) {
+      const key = targetId.replace('service-', '');
+      if (key === 'PROTESE_CAPILAR' || key === 'MANUTENCAO' || key === 'OUTROS_ASSUNTOS') {
+        handleSelectServiceCategory(key as ServiceCategory, customRowNodeId);
+      }
+      return;
+    }
+
+    const fuNode = SUPERVISOR_FOLLOW_CUSTOM_MAP[targetId];
+    if (fuNode) {
+      handleSelectFollowUpNode(fuNode);
+      return;
+    }
+
+    if (targetId === 'fechados') {
+      clearSeller();
+      setSelectedServiceCategory(null);
+      setViewingIntervencaoHumana(false);
+      setSelectedTodasDemandasSubdivision(null);
+      setSelectedDemandaKey(null);
+      setSelectedAttendanceFilter('tudo');
+      setExpandedTodasDemandas(false);
+      setSelectedFechadosFilter(true);
+      setSelectedFollowUpNode(null);
+      setPendingQuotes([]);
+      setMobileChatLayer('conversations');
+      return;
+    }
+
+    const demandaSub = SUPERVISOR_DEMANDA_TARGET_TO_SUB[targetId];
+    if (demandaSub) {
+      clearSeller();
+      setExpandedTodasDemandas(true);
+      if (demandaSub === '__all__') {
+        void handleSelectTodasDemandasMain();
+      } else {
+        void handleSelectTodasDemandasSubdivision(demandaSub);
+      }
+      setMobileChatLayer('conversations');
+    }
+  };
 
   return (
     <div className="flex h-[100dvh] md:h-screen overflow-hidden bg-slate-100 dark:bg-slate-950 flex-col md:flex-row page-load-fade">
@@ -4767,6 +5142,17 @@ export const SupervisorDashboard: React.FC = () => {
           </button>
           <button
             type="button"
+            data-sidebar-tab-active={activeSupervisorTab === 'followup' ? true : undefined}
+            onClick={() => handleSupervisorTabChange('followup')}
+            className={`relative z-10 p-2 rounded-lg transition-colors duration-300 ease-out flex items-center active:scale-95 hover:bg-white/10 ${
+              sidebarOpen ? 'gap-3 w-full' : 'justify-center'
+            }`}
+          >
+            <span className="material-icons-round">schedule_send</span>
+            {sidebarOpen && <span className="text-sm">Follow up</span>}
+          </button>
+          <button
+            type="button"
             data-sidebar-tab-active={activeSupervisorTab === 'estatisticas' ? true : undefined}
             onClick={() => handleSupervisorTabChange('estatisticas')}
             className={`relative z-10 p-2 rounded-lg transition-colors duration-300 ease-out flex items-center active:scale-95 hover:bg-white/10 ${
@@ -4820,7 +5206,8 @@ export const SupervisorDashboard: React.FC = () => {
       >
         {([
           { key: 'chat' as SupervisorTab, icon: 'chat', label: 'Chat' },
-          { key: 'estatisticas' as SupervisorTab, icon: 'analytics', label: 'Estatísticas' },
+          { key: 'followup' as SupervisorTab, icon: 'schedule_send', label: 'Follow up' },
+          { key: 'estatisticas' as SupervisorTab, icon: 'analytics', label: 'Stats' },
           { key: 'contatos' as SupervisorTab, icon: 'contacts', label: 'Contatos' },
         ]).map((item) => (
           <button
@@ -4869,6 +5256,40 @@ export const SupervisorDashboard: React.FC = () => {
           <div className="mb-6 space-y-1">
             <button
               type="button"
+              data-division-active={selectedAttendanceFilter === 'todas-entrada' ? true : undefined}
+              onClick={() => {
+                clearSupervisorCustomNavSelection();
+                setSelectedConversation(null);
+                setViewingIntervencaoHumana(false);
+                setSelectedServiceCategory(null);
+                setSelectedNaoAtribuidosFilter('todos');
+                setSelectedFechadosFilter(false);
+                setSelectedFollowUpNode(null);
+                setSelectedTodasDemandasSubdivision(null);
+                setSelectedSeller(null);
+                setSelectedSellerBrand(null);
+                setSelectedAttendanceFilter('todas-entrada');
+                setMobileChatLayer('conversations');
+              }}
+              className={`relative z-10 w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] min-w-0 ${
+                selectedAttendanceFilter === 'todas-entrada'
+                  ? 'text-slate-900 dark:text-white font-medium'
+                  : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
+              style={selectedAttendanceFilter === 'todas-entrada' ? divisionUiNavStyle('abertos', true) : {}}
+            >
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">view_list</span>
+                <div className="flex flex-col items-start min-w-0 flex-1">
+                  <span className="truncate">Todas</span>
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                    Abertos, atalhos, follow-up e atribuídos
+                  </span>
+                </div>
+              </div>
+            </button>
+            <button
+              type="button"
               data-division-active={selectedAttendanceFilter === 'abertos' ? true : undefined}
               onDragOver={(e) => {
                 allowSupervisorAttendanceDrag(e);
@@ -4881,6 +5302,7 @@ export const SupervisorDashboard: React.FC = () => {
               }
               onDrop={(e) => void runSupervisorMoveDrop(e, { kind: 'nao_atribuidos', bucket: 'triagem' })}
               onClick={() => {
+                clearSupervisorCustomNavSelection();
                 setSelectedAttendanceFilter('abertos');
                 setViewingIntervencaoHumana(false);
                 setSelectedServiceCategory(null);
@@ -4896,11 +5318,11 @@ export const SupervisorDashboard: React.FC = () => {
               className={`relative z-10 w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] min-w-0 ${
                 supervisorDropHoverKey === 'drop-abertos' ? 'ring-2 ring-sky-500 ring-inset ' : ''
               } ${
-                isOpenTreeActive
+                abertosTreeRowHighlight
                   ? 'text-slate-900 dark:text-white font-medium'
                   : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
               }`}
-              style={isOpenTreeActive ? divisionUiNavStyle('abertos', true) : {}}
+              style={abertosTreeRowHighlight ? divisionUiNavStyle('abertos', true) : {}}
             >
               <div className="flex items-center gap-2 min-w-0 flex-1">
                 <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">folder_open</span>
@@ -4934,7 +5356,10 @@ export const SupervisorDashboard: React.FC = () => {
                   setSupervisorDropHoverKey((k) => (k === 'drop-ai-todos' ? null : k))
                 }
                 onDrop={(e) => void runSupervisorMoveDrop(e, { kind: 'nao_atribuidos', bucket: 'triagem' })}
-                onClick={handleSelectNaoAtribuidos}
+                onClick={() => {
+                  clearSupervisorCustomNavSelection();
+                  handleSelectNaoAtribuidos();
+                }}
                 className={`relative z-10 w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] min-w-0 ${
                   supervisorDropHoverKey === 'drop-ai-todos' ? 'ring-2 ring-sky-500 ring-inset ' : ''
                 } ${
@@ -4989,6 +5414,7 @@ export const SupervisorDashboard: React.FC = () => {
                     void runSupervisorMoveDrop(e, { kind: 'intervencao', interventionType: 'demanda-telefone-fixo' })
                   }
                   onClick={() => {
+                    clearSupervisorCustomNavSelection();
                     setViewingIntervencaoHumana(true);
                     setSelectedServiceCategory(null);
                     setSelectedConversation(null);
@@ -5072,7 +5498,10 @@ export const SupervisorDashboard: React.FC = () => {
                             interventionType: interventionDropType,
                           })
                         }
-                        onClick={() => handleSelectServiceCategory(key)}
+                        onClick={() => {
+                          clearSupervisorCustomNavSelection();
+                          handleSelectServiceCategory(key);
+                        }}
                         className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
                           supervisorDropHoverKey === serviceDropKey ? 'ring-2 ring-sky-500 ring-inset ' : ''
                         } ${
@@ -5103,127 +5532,88 @@ export const SupervisorDashboard: React.FC = () => {
             </div>
           </div>
 
+          <SupervisorCustomSidebarSection
+            nodes={customSidebarNodes}
+            canEdit={canCustomizeDivisionUi}
+            onPersist={persistSupervisorCustomSidebar}
+            navigateToTarget={navigateSupervisorCustomTarget}
+            selectedCustomNavNodeId={supervisorCustomNavSelectedNodeId}
+            divisionUiNavStyle={divisionUiNavStyle}
+            conversationDragEnabled={supervisorConversationDragEnabled}
+            supervisorDropHoverKey={supervisorDropHoverKey}
+            setSupervisorDropHoverKey={setSupervisorDropHoverKey}
+            allowSupervisorAttendanceDrag={allowSupervisorAttendanceDrag}
+            runSupervisorMoveDrop={runSupervisorMoveDrop}
+            customLaneActiveCount={(nodeId) => activeCountBySubdivision[`customSidebar-${nodeId}`] ?? 0}
+          />
+
           <div className="pt-6 mb-4">
             <div className="border-t border-slate-200 dark:border-slate-700" />
           </div>
 
-          {/* Follow up - raiz da árvore */}
+          <div className="space-y-0.5">
+          {/* Follow-up manual: duas divisões uma em baixo da outra */}
           <button
             type="button"
-            data-division-active={selectedFollowUpNode === 'follow-up' ? true : undefined}
-            onClick={() => handleSelectFollowUpNode('follow-up')}
+            data-division-active={selectedFollowUpNode === 'manual-pending' ? true : undefined}
+            onClick={() => {
+              clearSupervisorCustomNavSelection();
+              handleSelectFollowUpNode('manual-pending');
+            }}
             className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
-              selectedFollowUpNode === 'follow-up'
+              selectedFollowUpNode === 'manual-pending'
                 ? 'text-slate-900 dark:text-white font-medium'
                 : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
             }`}
-            style={selectedFollowUpNode === 'follow-up' ? divisionUiNavStyle('follow-up', true) : {}}
+            style={selectedFollowUpNode === 'manual-pending' ? divisionUiNavStyle('manual-pending', true) : {}}
           >
             <div className="flex flex-col items-start min-w-0 flex-1">
               <div className="flex items-center gap-2 w-full min-w-0">
                 <span className="material-icons-round text-base text-slate-500 dark:text-slate-300 flex-shrink-0">schedule</span>
-                <span className="truncate">{divisionUiLabel('follow-up', 'Follow up')}</span>
+                <span className="truncate">{divisionUiLabel('manual-pending', 'Aguardando follow up')}</span>
               </div>
               <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 ml-6">
-                {activeCountBySubdivision['follow-up'] ?? 0} Atendimentos em follow up
+                {manualFollowUpSidebarCounts.pendingJobs} agendamento(s) · {manualFollowUpSidebarCounts.pendingContacts}{' '}
+                contato(s) nesta sessão
               </span>
             </div>
             <SupervisorDivisionUiBtn
-              uiKey="follow-up"
+              uiKey="manual-pending"
               canEdit={canCustomizeDivisionUi}
               onOpen={setDivisionUiModalKey}
             />
           </button>
 
-          <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${closedTreeLineClass}`}>
-              <button
-                type="button"
-                data-division-active={selectedFollowUpNode === 'inativo-1h' ? true : undefined}
-                onClick={() => handleSelectFollowUpNode('inativo-1h')}
-                className={`relative z-10 w-full flex items-start justify-between gap-2 px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
-                  selectedFollowUpNode === 'inativo-1h'
-                    ? 'text-slate-900 dark:text-white font-medium'
-                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
-                }`}
-                style={selectedFollowUpNode === 'inativo-1h' ? divisionUiNavStyle('inativo-1h', true) : {}}
-              >
-                <div className="flex flex-col items-start min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isFollowUp1hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
-                    <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">hourglass_top</span>
-                    <span className="truncate">{divisionUiLabel('inativo-1h', 'Aguardando 1º Follow up')}</span>
-                  </div>
-                  <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
-                    {activeCountBySubdivision['inativo-1h'] ?? 0} Atendimentos nessa fase
-                  </span>
-                </div>
-                <SupervisorDivisionUiBtn
-                  uiKey="inativo-1h"
-                  canEdit={canCustomizeDivisionUi}
-                  onOpen={setDivisionUiModalKey}
-                />
-              </button>
-
-              <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${isFollowUp1hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
-                <button
-                  type="button"
-                  data-division-active={selectedFollowUpNode === 'inativo-12h' ? true : undefined}
-                  onClick={() => handleSelectFollowUpNode('inativo-12h')}
-                  className={`relative z-10 w-full flex items-start justify-between gap-2 px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
-                    selectedFollowUpNode === 'inativo-12h'
-                      ? 'text-slate-900 dark:text-white font-medium'
-                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
-                  }`}
-                  style={selectedFollowUpNode === 'inativo-12h' ? divisionUiNavStyle('inativo-12h', true) : {}}
-                >
-                  <div className="flex flex-col items-start min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isFollowUp12hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
-                      <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">update</span>
-                      <span className="truncate">{divisionUiLabel('inativo-12h', 'Aguardando 2º Follow up')}</span>
-                    </div>
-                    <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
-                      {activeCountBySubdivision['inativo-12h'] ?? 0} Atendimentos nessa fase
-                    </span>
-                  </div>
-                  <SupervisorDivisionUiBtn
-                    uiKey="inativo-12h"
-                    canEdit={canCustomizeDivisionUi}
-                    onOpen={setDivisionUiModalKey}
-                  />
-                </button>
-
-                <div className={`ml-4 border-l pl-2 transition-colors duration-500 ease-in-out ${isFollowUp12hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
-                  <button
-                    type="button"
-                    data-division-active={selectedFollowUpNode === 'inativo-24h' ? true : undefined}
-                    onClick={() => handleSelectFollowUpNode('inativo-24h')}
-                    className={`relative z-10 w-full flex items-start justify-between gap-2 px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
-                      selectedFollowUpNode === 'inativo-24h'
-                        ? 'text-slate-900 dark:text-white font-medium'
-                        : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
-                    }`}
-                    style={selectedFollowUpNode === 'inativo-24h' ? divisionUiNavStyle('inativo-24h', true) : {}}
-                  >
-                    <div className="flex flex-col items-start min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isFollowUp24hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
-                        <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">timer</span>
-                        <span className="truncate">{divisionUiLabel('inativo-24h', 'Aguardando')}</span>
-                      </div>
-                      <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
-                        {activeCountBySubdivision['inativo-24h'] ?? 0} Atendimentos nessa fase
-                      </span>
-                    </div>
-                    <SupervisorDivisionUiBtn
-                      uiKey="inativo-24h"
-                      canEdit={canCustomizeDivisionUi}
-                      onOpen={setDivisionUiModalKey}
-                    />
-                  </button>
-                </div>
+          <button
+            type="button"
+            data-division-active={selectedFollowUpNode === 'manual-sent' ? true : undefined}
+            onClick={() => {
+              clearSupervisorCustomNavSelection();
+              handleSelectFollowUpNode('manual-sent');
+            }}
+            className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
+              selectedFollowUpNode === 'manual-sent'
+                ? 'text-slate-900 dark:text-white font-medium'
+                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+            }`}
+            style={selectedFollowUpNode === 'manual-sent' ? divisionUiNavStyle('manual-sent', true) : {}}
+          >
+            <div className="flex flex-col items-start min-w-0 flex-1">
+              <div className="flex items-center gap-2 w-full min-w-0">
+                <span className="material-icons-round text-base text-slate-500 dark:text-slate-300 flex-shrink-0">send</span>
+                <span className="truncate">{divisionUiLabel('manual-sent', 'Follow up enviado')}</span>
               </div>
+              <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 ml-6">
+                {manualFollowUpSidebarCounts.sentJobs} envio(s) registado(s) nesta sessão
+              </span>
             </div>
+            <SupervisorDivisionUiBtn
+              uiKey="manual-sent"
+              canEdit={canCustomizeDivisionUi}
+              onOpen={setDivisionUiModalKey}
+            />
+          </button>
+          </div>
 
           <div className="pt-6 mb-4">
             <div className="border-t border-slate-200 dark:border-slate-700" />
@@ -5234,6 +5624,7 @@ export const SupervisorDashboard: React.FC = () => {
             type="button"
             data-division-active={isFechadosActive ? true : undefined}
             onClick={() => {
+              clearSupervisorCustomNavSelection();
               setSelectedConversation(null);
               setSelectedSeller(null);
               setSelectedSellerBrand(null);
@@ -5616,7 +6007,7 @@ export const SupervisorDashboard: React.FC = () => {
             </div>
           ) : (
             <div key={`${divisionViewKey}-loaded`} className="animate-slideRollIn min-h-full">
-            {(selectedSeller || selectedServiceCategory || (viewingIntervencaoHumana && !selectedServiceCategory) || selectedAttendanceFilter === 'abertos' || selectedAttendanceFilter === 'nao-atribuidos' || selectedAttendanceFilter === 'tudo' || !!selectedFollowUpNode) && conversations.length > 0 ? (
+            {(selectedSeller || selectedServiceCategory || (viewingIntervencaoHumana && !selectedServiceCategory) || selectedAttendanceFilter === 'todas-entrada' || selectedAttendanceFilter === 'abertos' || selectedAttendanceFilter === 'nao-atribuidos' || selectedAttendanceFilter === 'tudo' || !!selectedFollowUpNode) && conversations.length > 0 ? (
             (() => {
               const filteredConversations = formatConversationsForDisplay(conversations)
                 .filter((conv) => {
@@ -5711,7 +6102,7 @@ export const SupervisorDashboard: React.FC = () => {
                             prevCache.map((c) => (c.id === conv.id ? { ...c, unread: 0 } : c))
                           );
                         }
-                        if (selectedAttendanceFilter === 'abertos') {
+                        if (selectedAttendanceFilter === 'abertos' || selectedAttendanceFilter === 'todas-entrada') {
                           const prevUnread = (conv as { unread?: number }).unread ?? 0;
                           setTotalUnreadAbertos((u) => Math.max(0, u - prevUnread));
                         }
@@ -5728,7 +6119,7 @@ export const SupervisorDashboard: React.FC = () => {
                             prevCache.map((c) => (c.id === conv.id ? { ...c, unread: 0 } : c))
                           );
                         }
-                        if (selectedAttendanceFilter === 'abertos') {
+                        if (selectedAttendanceFilter === 'abertos' || selectedAttendanceFilter === 'todas-entrada') {
                           const prevUnread = (conv as { unread?: number }).unread ?? 0;
                           setTotalUnreadAbertos((u) => Math.max(0, u - prevUnread));
                         }
@@ -5770,13 +6161,20 @@ export const SupervisorDashboard: React.FC = () => {
                         <h4 className="text-sm font-bold truncate text-slate-900 dark:text-white">{conv.name}</h4>
                       )}
                       {(() => {
-                        // View Follow-up: badge indicando fase (1º, 2º ou Aguardando)
+                        // Follow-up manual na entrada: badges Aguardando / Enviado
                         if (selectedFollowUpNode && (conv as any).followUpPhase) {
                           const phase = (conv as any).followUpPhase;
                           const phaseColors: Record<string, string> = {
-                            'Aguardando 1º Follow up': 'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200',
-                            'Aguardando 2º Follow up': 'bg-orange-100 dark:bg-orange-900/40 text-orange-800 dark:text-orange-200',
-                            'Aguardando': 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400',
+                            Aguardando:
+                              'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200',
+                            Enviado:
+                              'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-800 dark:text-emerald-200',
+                            'Follow up enviado (sessão)':
+                              'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-800 dark:text-emerald-200',
+                            'Aguardando 1º Follow up':
+                              'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200',
+                            'Aguardando 2º Follow up':
+                              'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200',
                           };
                           const color = phaseColors[phase] ?? 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400';
                           return (
@@ -5785,8 +6183,8 @@ export const SupervisorDashboard: React.FC = () => {
                             </span>
                           );
                         }
-                        // View Abertos: badge indicando origem (AI, Intervenção, Vendedor)
-                        if (selectedAttendanceFilter === 'abertos') {
+                        // View Abertos / Todas: badge indicando origem (AI, Intervenção, Vendedor)
+                        if (selectedAttendanceFilter === 'abertos' || selectedAttendanceFilter === 'todas-entrada') {
                           const att = (conv as any).attributionSource;
                           const hasSeller = (conv as any).sellerId || att?.sellerId;
                           const hasIntervention = (conv as any).interventionType || att?.interventionType;
@@ -5860,9 +6258,15 @@ export const SupervisorDashboard: React.FC = () => {
                         const attrLabel = (conv as any).attributionSource?.label;
                         const unassignedSrc = (conv as any).unassignedSource;
                         const inferredServiceLabel = getServiceLabelFromConv(conv, selectedServiceCategory);
-                        const badgeLabel = inferredServiceLabel
-                          ?? attrLabel
-                          ?? (selectedAttendanceFilter === 'nao-atribuidos' && unassignedSrc ? 'AI' : null);
+                        const customPinId = (conv as Conversation).supervisorCustomSidebarNodeId;
+                        const customPinLabel = customPinId
+                          ? customSidebarNodes.find((n) => n.id === customPinId)?.label
+                          : null;
+                        const badgeLabel =
+                          customPinLabel ??
+                          inferredServiceLabel ??
+                          attrLabel ??
+                          (selectedAttendanceFilter === 'nao-atribuidos' && unassignedSrc ? 'AI' : null);
                         if (!badgeLabel) return null;
                         return (
                           <span className="inline-block mt-0.5 text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 truncate max-w-[140px]" title={badgeLabel}>
@@ -5911,6 +6315,8 @@ export const SupervisorDashboard: React.FC = () => {
                     ? 'Nenhuma conversa de intervenção no momento'
                     : selectedServiceCategory && viewingIntervencaoHumana
                     ? `Nenhuma conversa de intervenção em ${SERVICE_CATEGORIES.find(c => c.key === selectedServiceCategory)?.label ?? selectedServiceCategory} no momento`
+                    : selectedAttendanceFilter === 'todas-entrada'
+                    ? 'Nenhuma conversa na entrada no momento'
                     : selectedAttendanceFilter === 'abertos'
                     ? 'Nenhum atendimento aberto no momento'
                     : selectedAttendanceFilter === 'nao-atribuidos'
@@ -6269,6 +6675,15 @@ export const SupervisorDashboard: React.FC = () => {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+
+        {/* Follow up manual — supervisor */}
+        <div
+          className={`absolute inset-0 w-full min-w-full md:min-w-0 flex flex-col min-h-0 supervisor-tab-panel ${getSupervisorTabSlideClass('followup', activeSupervisorTab)} ${activeSupervisorTab !== 'followup' ? 'pointer-events-none' : 'pointer-events-auto'}`}
+        >
+          <div className="flex-1 min-h-0 min-w-0 overflow-auto bg-slate-100 dark:bg-slate-950 pb-20 md:pb-6">
+            <SupervisorFollowUpTab />
           </div>
         </div>
 
