@@ -99,6 +99,10 @@ export class AIConfigController {
     // Follow-up movement configuration (when to move between divisions)
     this.router.get('/follow-up-movement-config', this.getFollowUpMovementConfig.bind(this));
     this.router.put('/follow-up-movement-config', this.updateFollowUpMovementConfig.bind(this));
+
+    // Divisões / subdivisões — nomes e cores na entrada (supervisor)
+    this.router.get('/division-subdivision-ui', this.getDivisionSubdivisionUi.bind(this));
+    this.router.put('/division-subdivision-ui', this.mergeDivisionSubdivisionUi.bind(this));
   }
 
   private async getAgentPrompt(req: Request, res: Response): Promise<void> {
@@ -1566,6 +1570,9 @@ export class AIConfigController {
         closeDelayMinutes?: number;
         firstMessage?: string;
         secondMessage?: string;
+        firstFollowUpEnabled?: boolean;
+        secondFollowUpEnabled?: boolean;
+        autoCloseAfterFollowUpEnabled?: boolean;
       };
       const config = await aiConfigService.getFollowUpConfig();
       const updated = await aiConfigService.updateFollowUpConfig({
@@ -1574,6 +1581,10 @@ export class AIConfigController {
         closeDelayMinutes: body.closeDelayMinutes ?? config.closeDelayMinutes,
         firstMessage: body.firstMessage ?? config.firstMessage,
         secondMessage: body.secondMessage ?? config.secondMessage,
+        firstFollowUpEnabled: body.firstFollowUpEnabled ?? config.firstFollowUpEnabled,
+        secondFollowUpEnabled: body.secondFollowUpEnabled ?? config.secondFollowUpEnabled,
+        autoCloseAfterFollowUpEnabled:
+          body.autoCloseAfterFollowUpEnabled ?? config.autoCloseAfterFollowUpEnabled,
       });
       res.json({ success: true, data: updated });
     } catch (error: any) {
@@ -1621,6 +1632,64 @@ export class AIConfigController {
       res.status(400).json({
         success: false,
         error: error.message || 'Erro ao atualizar configuração de movimentação',
+      });
+    }
+  }
+
+  /**
+   * GET /ai/config/division-subdivision-ui
+   */
+  private async getDivisionSubdivisionUi(req: Request, res: Response): Promise<void> {
+    try {
+      const entries = await aiConfigService.getDivisionSubdivisionUi();
+      res.json({ success: true, data: { entries } });
+    } catch (error: any) {
+      logger.error('Error in getDivisionSubdivisionUi', { error: error.message });
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erro ao buscar aparência das divisões',
+      });
+    }
+  }
+
+  /**
+   * PUT /ai/config/division-subdivision-ui
+   * Supervisor, Admin Geral ou Super Admin (alteração global para todos).
+   */
+  private async mergeDivisionSubdivisionUi(req: Request, res: Response): Promise<void> {
+    try {
+      const userRole = (req as any).user?.role as UserRole;
+      const canEdit =
+        userRole === UserRole.SUPERVISOR ||
+        userRole === UserRole.ADMIN_GENERAL ||
+        userRole === UserRole.SUPER_ADMIN;
+      if (!canEdit) {
+        res.status(403).json({
+          success: false,
+          error: 'Apenas supervisores ou administradores podem alterar a aparência das divisões',
+        });
+        return;
+      }
+
+      const { patch } = req.body as {
+        patch?: Record<string, { label?: string; color?: string; accentColor?: string } | null>;
+      };
+
+      if (!patch || typeof patch !== 'object') {
+        res.status(400).json({
+          success: false,
+          error: 'patch deve ser um objeto { [chave]: { label?, color?, accentColor? } | null }',
+        });
+        return;
+      }
+
+      const result = await aiConfigService.mergeDivisionSubdivisionUi(patch);
+      res.json({ success: true, data: result });
+    } catch (error: any) {
+      logger.error('Error in mergeDivisionSubdivisionUi', { error: error.message });
+      res.status(400).json({
+        success: false,
+        error: error.message || 'Erro ao guardar aparência das divisões',
       });
     }
   }

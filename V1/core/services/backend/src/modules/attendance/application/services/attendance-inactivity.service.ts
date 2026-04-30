@@ -17,10 +17,10 @@ const DEFAULT_TEMPO_INATIVIDADE_BALCAO_MIN = 30; // 30 minutos padrão
 
 export class AttendanceInactivityService {
   /**
-   * Check and send follow-up messages for inactive attendances.
-   * - 1º follow-up: 1h sem resposta do cliente (após resposta AI/HUMANO)
-   * - 2º follow-up: 24h após o 1º follow-up, se cliente ainda não respondeu
-   * - Fechamento automático: 36h de inatividade (após 2º follow-up)
+   * Check and send follow-up messages for inactive attendances (por etapa, conforme config).
+   * - 1º follow-up: quando ativo, após firstDelayMinutes sem resposta do cliente
+   * - 2º follow-up: quando ativo, após secondDelayMinutes desde o 1º envio (sem nova resposta)
+   * - Fechamento: quando autoClose está ativo — após 2º envio usa movimentação; só com 1º ativo usa closeDelayMinutes desde o 1º envio
    */
   async checkAndCloseInactiveAttendances(): Promise<number> {
     try {
@@ -34,6 +34,9 @@ export class AttendanceInactivityService {
 
       const followUpConfig = await aiConfigService.getFollowUpConfig();
       const movementConfig = await aiConfigService.getFollowUpMovementConfig();
+      const firstPhaseEnabled = followUpConfig.firstFollowUpEnabled !== false;
+      const secondPhaseEnabled = followUpConfig.secondFollowUpEnabled !== false;
+      const autoCloseEnabled = followUpConfig.autoCloseAfterFollowUpEnabled !== false;
       const firstCutoff = new Date(Date.now() - followUpConfig.firstDelayMinutes * 60 * 1000);
 
       // Processar atendimentos "abertos" do funil (inclui triagem/aberto/em_atendimento/aguardando_cliente)
@@ -110,7 +113,7 @@ export class AttendanceInactivityService {
         }
 
         // Fechamento automático: tempo após 2º follow-up (movimentação para Fechados)
-        if (normalizedState.secondSentAt) {
+        if (autoCloseEnabled && normalizedState.secondSentAt) {
           const secondSentAt = new Date(normalizedState.secondSentAt);
           const closeAfterMs = movementConfig.moveToFechadosAfterSecondFollowUpMinutes * 60 * 1000;
           if (Date.now() - secondSentAt.getTime() >= closeAfterMs) {
@@ -120,8 +123,24 @@ export class AttendanceInactivityService {
           }
         }
 
+        // Fechamento quando apenas o 1º follow-up está ativo (2º desativado): usa closeDelayMinutes a partir do 1º envio
+        if (
+          autoCloseEnabled &&
+          normalizedState.firstSentAt &&
+          !normalizedState.secondSentAt &&
+          !secondPhaseEnabled
+        ) {
+          const firstSentAt = new Date(normalizedState.firstSentAt);
+          const closeAfterMs = followUpConfig.closeDelayMinutes * 60 * 1000;
+          if (Date.now() - firstSentAt.getTime() >= closeAfterMs) {
+            await this.moveToFechados(attendance, 'followup_auto_close');
+            autoClosedCount++;
+            continue;
+          }
+        }
+
         // 1º follow-up: tempo configurado sem resposta do cliente (envio da mensagem)
-        if (!normalizedState.firstSentAt && lastClientMessageAt < firstCutoff) {
+        if (firstPhaseEnabled && !normalizedState.firstSentAt && lastClientMessageAt < firstCutoff) {
           const sent = await this.sendFollowUpMessage(
             attendance,
             1,
@@ -142,7 +161,7 @@ export class AttendanceInactivityService {
         }
 
         // 2º follow-up: tempo configurado após o primeiro follow-up, sem resposta do cliente
-        if (normalizedState.firstSentAt && !normalizedState.secondSentAt) {
+        if (secondPhaseEnabled && normalizedState.firstSentAt && !normalizedState.secondSentAt) {
           const firstSentAt = new Date(normalizedState.firstSentAt);
           const secondCutoff = new Date(firstSentAt.getTime() + followUpConfig.secondDelayMinutes * 60 * 1000);
           if (new Date() >= secondCutoff) {

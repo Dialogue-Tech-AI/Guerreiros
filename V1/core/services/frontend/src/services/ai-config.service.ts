@@ -587,6 +587,10 @@ export interface FollowUpConfig {
   closeDelayMinutes: number;
   firstMessage: string;
   secondMessage: string;
+  /** Por omissão true (retrocompatível com configs antigas) */
+  firstFollowUpEnabled?: boolean;
+  secondFollowUpEnabled?: boolean;
+  autoCloseAfterFollowUpEnabled?: boolean;
 }
 
 AIConfigService.prototype.getFollowUpConfig = async function(): Promise<FollowUpConfig> {
@@ -620,6 +624,31 @@ AIConfigService.prototype.updateFollowUpMovementConfig = async function(config: 
     '/ai/config/follow-up-movement-config',
     config
   );
+  return response.data.data;
+};
+
+/** Personalização global de nomes/cores na entrada (supervisor) */
+export interface DivisionSubdivisionUiEntry {
+  label?: string;
+  color?: string;
+  accentColor?: string;
+}
+
+AIConfigService.prototype.getDivisionSubdivisionUi = async function(): Promise<Record<string, DivisionSubdivisionUiEntry>> {
+  const response = await api.get<{
+    success: boolean;
+    data: { entries: Record<string, DivisionSubdivisionUiEntry> };
+  }>('/ai/config/division-subdivision-ui');
+  return response.data.data.entries ?? {};
+};
+
+AIConfigService.prototype.mergeDivisionSubdivisionUi = async function(
+  patch: Record<string, DivisionSubdivisionUiEntry | null>
+): Promise<{ entries: Record<string, DivisionSubdivisionUiEntry>; updatedAt: Date }> {
+  const response = await api.put<{
+    success: boolean;
+    data: { entries: Record<string, DivisionSubdivisionUiEntry>; updatedAt: Date };
+  }>('/ai/config/division-subdivision-ui', { patch });
   return response.data.data;
 };
 

@@ -14,6 +14,7 @@ import { CostsTab } from '../../components/SuperAdmin/CostsTab';
 import { SubdivisionInactivityTimeouts } from '../../components/SuperAdmin/SubdivisionInactivityTimeouts';
 import { FollowUpConfigTab } from '../../components/SuperAdmin/FollowUpConfigTab';
 import { FollowUpMovementConfigTab } from '../../components/SuperAdmin/FollowUpMovementConfigTab';
+import { DivisionSubdivisionAppearanceCard } from '../../components/SuperAdmin/DivisionSubdivisionAppearanceCard';
 import { AutoReopenTimeout } from '../../components/SuperAdmin/AutoReopenTimeout';
 import { ImageDescriptionPrompt } from '../../components/SuperAdmin/ImageDescriptionPrompt';
 import { BibliotecaDashboard, type BibliotecaSchema } from '../../components/SuperAdmin/BibliotecaDashboard';
@@ -516,6 +517,9 @@ export const SuperAdminDashboard: React.FC = () => {
     closeDelayMinutes: 2160,
     firstMessage: '',
     secondMessage: '',
+    firstFollowUpEnabled: true,
+    secondFollowUpEnabled: true,
+    autoCloseAfterFollowUpEnabled: true,
   });
   const [isLoadingFollowUp, setIsLoadingFollowUp] = useState(false);
   const [isSavingFollowUp, setIsSavingFollowUp] = useState(false);
@@ -1640,12 +1644,14 @@ export const SuperAdminDashboard: React.FC = () => {
   };
 
   const handleSaveFollowUpConfig = async () => {
-    if (!followUpConfig.firstMessage?.trim()) {
-      toast.error('A mensagem do 1º follow-up é obrigatória');
+    const firstOn = followUpConfig.firstFollowUpEnabled !== false;
+    const secondOn = followUpConfig.secondFollowUpEnabled !== false && firstOn;
+    if (firstOn && !followUpConfig.firstMessage?.trim()) {
+      toast.error('A mensagem do 1º follow-up é obrigatória quando o 1º follow-up está ativo');
       return;
     }
-    if (!followUpConfig.secondMessage?.trim()) {
-      toast.error('A mensagem do 2º follow-up é obrigatória');
+    if (secondOn && !followUpConfig.secondMessage?.trim()) {
+      toast.error('A mensagem do 2º follow-up é obrigatória quando o 2º follow-up está ativo');
       return;
     }
     setIsSavingFollowUp(true);
@@ -4972,6 +4978,8 @@ export const SuperAdminDashboard: React.FC = () => {
                           onSaveSubdivisionTimeouts={handleSaveSubdivisionInactivityTimeouts}
                         />
                       </div>
+
+                      <DivisionSubdivisionAppearanceCard />
 
                       {/* Row 4: Follow-up Config (tempos e mensagens de follow-up por inatividade) */}
                       <FollowUpConfigTab

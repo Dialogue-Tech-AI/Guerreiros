@@ -21,8 +21,9 @@ export class ImportedContact {
   @Column({ name: 'client_name', type: 'varchar', length: 200, nullable: true })
   clientName?: string | null;
 
-  @Column({ name: 'whatsapp_number_id', type: 'uuid' })
-  whatsappNumberId!: UUID;
+  /** Legado: contatos são únicos por cliente na plataforma; pode ser nulo. */
+  @Column({ name: 'whatsapp_number_id', type: 'uuid', nullable: true })
+  whatsappNumberId?: UUID | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;

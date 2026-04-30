@@ -88,6 +88,8 @@ export interface EnvironmentVariables {
   // Logging
   LOG_LEVEL: string;
   LOG_FORMAT: string;
+  /** Quando true, envia logs da app para bucket S3/MinIO (bucket logs). Default false em dev para evitar ruído e RequestTimeTooSkewed. */
+  S3_LOG_TRANSPORT_ENABLED: boolean;
 
   // Attendance Configuration
   ATTENDANCE_INACTIVE_TIMEOUT: number;
@@ -248,5 +250,15 @@ export function validateEnv(): EnvironmentVariables {
     }
   }
 
+  env.S3_LOG_TRANSPORT_ENABLED = parseBoolEnv(process.env.S3_LOG_TRANSPORT_ENABLED, false);
+
   return env;
+}
+
+function parseBoolEnv(raw: string | undefined, defaultValue: boolean): boolean {
+  if (raw === undefined || raw === '') return defaultValue;
+  const s = String(raw).trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(s)) return true;
+  if (['false', '0', 'no', 'off'].includes(s)) return false;
+  return defaultValue;
 }

@@ -11,7 +11,7 @@
     "lint:fix": "eslint . --ext .ts --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "migration:generate": "typeorm migration:generate",
-    "migration:run": "ts-node scripts/db/run-migrations.ts",
+    "migration:run": "cross-env NODE_PATH=./node_modules ts-node --project tsconfig.migrations.json scripts/db/run-migrations.ts",
     "migration:revert": "typeorm migration:revert",
     "seed:run": "cross-env NODE_PATH=./node_modules ts-node --project tsconfig.seed.json scripts/seed/index.ts",
     "seed:processes": "cross-env NODE_PATH=./node_modules ts-node --project tsconfig.seed.json ../../shared/database/seed/seed-processes.ts",

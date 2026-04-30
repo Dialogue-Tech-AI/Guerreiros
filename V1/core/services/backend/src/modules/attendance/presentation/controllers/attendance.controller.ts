@@ -200,6 +200,12 @@ export class AttendanceController {
       this.assignSellerToSeller.bind(this)
     );
 
+    // Supervisor: mover fila/subdivisão (drag-and-drop no painel Entrada)
+    this.router.post(
+      '/:attendanceId/supervisor/move-queue',
+      this.supervisorMoveQueue.bind(this)
+    );
+
     // Close attendance manually (supervisor)
     this.router.post(
       '/:attendanceId/close',
@@ -3192,6 +3198,225 @@ export class AttendanceController {
       res.json({ success: true, attendanceId: attendance.id, sellerId: attendance.sellerId });
     } catch (error: any) {
       logger.error('Error assigning attendance to seller', {
+        error: error.message,
+        stack: error.stack,
+      });
+      res.status(500).json({ error: error.message ?? 'Internal server error' });
+    }
+  }
+
+  /** Subdivisões de fila de vendedor aceitas ao mover manualmente pelo supervisor. */
+  private static readonly SUPERVISOR_MOVE_SELLER_SUBDIVISIONS = new Set([
+    'pedidos-orcamentos',
+    'perguntas-pos-orcamento',
+    'confirmacao-pix',
+    'tirar-pedido',
+    'informacoes-entrega',
+    'encomendas',
+    'cliente-pediu-humano',
+  ]);
+
+  /**
+   * Supervisor move-queue: AI (triagem / encaminhados), intervenção humana ou subdivisão de vendedor.
+   * Body: { target: { kind: 'nao_atribuidos' | 'intervencao' | 'vendedor', ... } }
+   */
+  private async supervisorMoveQueue(req: Request, res: Response): Promise<void> {
+    try {
+      const { attendanceId } = req.params;
+      const userId = (req as any).user?.sub as UUID;
+      const userRole = (req as any).user?.role as UserRole;
+
+      if (!userId || !userRole) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      if (userRole !== UserRole.SUPERVISOR && userRole !== UserRole.SUPER_ADMIN) {
+        res.status(403).json({ error: 'Acesso negado' });
+        return;
+      }
+
+      const body = req.body as {
+        target?: {
+          kind?: string;
+          bucket?: string;
+          interventionType?: string;
+          sellerId?: string;
+          sellerSubdivision?: string;
+        };
+      };
+      const target = body?.target;
+      if (!target?.kind) {
+        res.status(400).json({ error: 'target.kind é obrigatório' });
+        return;
+      }
+
+      const attendanceRepo = AppDataSource.getRepository(Attendance);
+      const sellerRepo = AppDataSource.getRepository(Seller);
+
+      const attendance = await attendanceRepo.findOne({
+        where: { id: attendanceId as UUID },
+        relations: ['seller', 'supervisor'],
+      });
+
+      if (!attendance) {
+        res.status(404).json({ error: 'Attendance not found' });
+        return;
+      }
+
+      if (attendance.isFinalized || attendance.operationalState === OperationalState.FECHADO_OPERACIONAL) {
+        res.status(400).json({ error: 'Atendimento fechado não pode ser movido' });
+        return;
+      }
+
+      if (userRole === UserRole.SUPERVISOR) {
+        const supervisorSellers = await getSellersBySupervisorId(sellerRepo, userId as string, { withUser: false });
+        const supervisorSellerIds = supervisorSellers.map((s) => s.id);
+
+        const canMove =
+          !attendance.sellerId ||
+          attendance.supervisorId === userId ||
+          (!!attendance.sellerId && supervisorSellerIds.includes(attendance.sellerId));
+
+        if (!canMove) {
+          res.status(403).json({ error: 'Access denied' });
+          return;
+        }
+      }
+
+      const previousSellerId = attendance.sellerId ?? null;
+
+      if (target.kind === 'nao_atribuidos') {
+        const bucket = target.bucket as string | undefined;
+        if (
+          bucket !== 'triagem' &&
+          bucket !== 'encaminhados-ecommerce' &&
+          bucket !== 'encaminhados-balcao'
+        ) {
+          res.status(400).json({ error: 'bucket inválido para nao_atribuidos' });
+          return;
+        }
+
+        attendance.sellerId = null as any;
+        attendance.sellerSubdivision = null as any;
+
+        if (bucket === 'triagem') {
+          attendance.interventionType = null as any;
+        } else if (bucket === 'encaminhados-ecommerce') {
+          attendance.interventionType = 'encaminhados-ecommerce';
+        } else {
+          attendance.interventionType = 'encaminhados-balcao';
+        }
+      } else if (target.kind === 'intervencao') {
+        const it = target.interventionType;
+        if (
+          it !== 'demanda-telefone-fixo' &&
+          it !== 'protese-capilar' &&
+          it !== 'outros-assuntos'
+        ) {
+          res.status(400).json({ error: 'interventionType inválido' });
+          return;
+        }
+
+        attendance.sellerId = null as any;
+        attendance.sellerSubdivision = null as any;
+        attendance.interventionType = it;
+      } else if (target.kind === 'vendedor') {
+        const sellerId = target.sellerId as string | undefined;
+        const sellerSubdivision = target.sellerSubdivision as string | undefined;
+
+        if (!sellerId || !sellerSubdivision) {
+          res.status(400).json({ error: 'sellerId e sellerSubdivision são obrigatórios' });
+          return;
+        }
+
+        if (!AttendanceController.SUPERVISOR_MOVE_SELLER_SUBDIVISIONS.has(sellerSubdivision)) {
+          res.status(400).json({ error: 'sellerSubdivision inválida' });
+          return;
+        }
+
+        const seller = await sellerRepo.findOne({
+          where: { id: sellerId as UUID },
+          relations: ['supervisors'],
+        });
+
+        if (!seller) {
+          res.status(404).json({ error: 'Seller not found' });
+          return;
+        }
+
+        if (userRole === UserRole.SUPERVISOR) {
+          const isUnderSupervisor = seller.supervisors?.some((s) => s.id === userId);
+          if (!isUnderSupervisor) {
+            res.status(403).json({ error: 'Seller does not belong to this supervisor' });
+            return;
+          }
+        }
+
+        attendance.sellerId = seller.id;
+        attendance.interventionType = null as any;
+        attendance.sellerSubdivision = sellerSubdivision;
+
+        if (!attendance.supervisorId) {
+          attendance.supervisorId = userId;
+        }
+        if (!attendance.operationalState || attendance.operationalState === OperationalState.TRIAGEM) {
+          attendance.operationalState = OperationalState.ABERTO;
+        }
+      } else {
+        res.status(400).json({ error: 'target.kind inválido' });
+        return;
+      }
+
+      attendance.updatedAt = new Date();
+      await attendanceRepo.save(attendance);
+
+      logger.info('Supervisor move-queue', {
+        attendanceId,
+        supervisorId: userId,
+        target,
+        previousSellerId,
+        newSellerId: attendance.sellerId ?? null,
+      });
+
+      if (userRole === UserRole.SUPERVISOR) {
+        this.attributedConversationsCache.delete(`sup:${userId}`);
+      }
+
+      const newSellerId = attendance.sellerId ?? null;
+      if (previousSellerId !== newSellerId) {
+        const eventData = {
+          attendanceId: attendance.id,
+          sellerId: newSellerId,
+          previousSellerId,
+          supervisorId: attendance.supervisorId,
+          clientPhone: attendance.clientPhone,
+          state: attendance.state,
+          handledBy: attendance.handledBy,
+          sellerSubdivision: attendance.sellerSubdivision ?? undefined,
+        };
+        if (newSellerId) {
+          socketService.emitToRoom(`seller_${newSellerId}`, 'attendance:routed', eventData);
+        }
+        if (previousSellerId) {
+          socketService.emitToRoom(`seller_${previousSellerId}`, 'attendance:routed', eventData);
+        }
+        socketService.emitToRoom('supervisors', 'attendance:routed', eventData);
+      }
+
+      invalidateSubdivisionCountsCache();
+      socketService.emitToRoom('supervisors', 'subdivision_counts_changed', {});
+
+      res.json({
+        success: true,
+        attendanceId: attendance.id,
+        sellerId: attendance.sellerId ?? null,
+        interventionType: attendance.interventionType ?? null,
+        sellerSubdivision: attendance.sellerSubdivision ?? null,
+      });
+    } catch (error: any) {
+      logger.error('Error supervisor move-queue', {
+        attendanceId: req.params.attendanceId,
         error: error.message,
         stack: error.stack,
       });

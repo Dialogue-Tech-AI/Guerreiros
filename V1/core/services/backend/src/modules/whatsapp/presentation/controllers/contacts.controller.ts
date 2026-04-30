@@ -19,6 +19,7 @@ import { logger } from '../../../../shared/utils/logger';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
 import { getSellersBySupervisorId } from '../../../seller/application/get-sellers-by-supervisor';
+import { buildClientPhoneVariants } from '../../../../shared/utils/client-phone-variants';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024 } });
 
@@ -260,17 +261,15 @@ export class ContactsController {
         return;
       }
 
-      const whatsappNumberId = (req.body?.whatsappNumberId ?? '').trim();
-      if (!whatsappNumberId) {
-        res.status(400).json({ error: 'whatsappNumberId é obrigatório' });
-        return;
-      }
+      const whatsappNumberId = String(req.body?.whatsappNumberId ?? '').trim();
 
       const whatsappNumberRepo = AppDataSource.getRepository(WhatsAppNumber);
-      const wpNumber = await whatsappNumberRepo.findOne({ where: { id: whatsappNumberId } });
-      if (!wpNumber || wpNumber.adapterType !== WhatsAppAdapterType.UNOFFICIAL) {
-        res.status(400).json({ error: 'Número selecionado não é Baileys (não-oficial)' });
-        return;
+      if (whatsappNumberId) {
+        const wpNumber = await whatsappNumberRepo.findOne({ where: { id: whatsappNumberId } });
+        if (!wpNumber || wpNumber.adapterType !== WhatsAppAdapterType.UNOFFICIAL) {
+          res.status(400).json({ error: 'Número selecionado não é Baileys (não-oficial)' });
+          return;
+        }
       }
 
       const contacts = this.parseContactsFromCsv(file.buffer);
@@ -291,13 +290,12 @@ export class ContactsController {
         });
         if (hasAttendance) continue;
         const existingImported = await importedContactRepo.findOne({
-          where: { clientPhone, whatsappNumberId },
+          where: { clientPhone },
         });
         if (!existingImported) {
           const imp = importedContactRepo.create({
             clientPhone,
             clientName: clientName?.trim()?.slice(0, 200) ?? null,
-            whatsappNumberId,
           });
           await importedContactRepo.save(imp);
           created++;
@@ -375,16 +373,23 @@ export class ContactsController {
 
       const attendanceRepo = AppDataSource.getRepository(Attendance);
 
-      const existing = await attendanceRepo.findOne({
-        where: {
-          clientPhone: body.clientPhone.trim(),
-          whatsappNumberId: body.whatsappNumberId,
-          operationalState: Not(OperationalState.FECHADO_OPERACIONAL),
-        },
-        order: { updatedAt: 'DESC' },
-      });
+      const phoneVariants = buildClientPhoneVariants(body.clientPhone.trim());
+      const existing =
+        phoneVariants.length > 0
+          ? await attendanceRepo.findOne({
+              where: {
+                clientPhone: In(phoneVariants),
+                operationalState: Not(OperationalState.FECHADO_OPERACIONAL),
+              },
+              order: { updatedAt: 'DESC' },
+            })
+          : null;
 
       if (existing) {
+        if (existing.whatsappNumberId !== body.whatsappNumberId) {
+          await attendanceRepo.update({ id: existing.id }, { whatsappNumberId: body.whatsappNumberId });
+          existing.whatsappNumberId = body.whatsappNumberId;
+        }
         const conversation = await this.buildConversationFromAttendance(existing);
         res.json({ success: true, attendanceId: existing.id, isNew: false, conversation });
         return;
@@ -392,9 +397,13 @@ export class ContactsController {
 
       const importedContactRepo = AppDataSource.getRepository(ImportedContact);
       const digitsForDelete = body.clientPhone.trim().replace(/\D/g, '');
-      const imported = await importedContactRepo.findOne({
-        where: { clientPhone: digitsForDelete, whatsappNumberId: body.whatsappNumberId },
-      });
+      const importedVariants = buildClientPhoneVariants(digitsForDelete);
+      const imported =
+        importedVariants.length > 0
+          ? await importedContactRepo.findOne({
+              where: { clientPhone: In(importedVariants) },
+            })
+          : await importedContactRepo.findOne({ where: { clientPhone: digitsForDelete } });
       const importedClientName = imported?.clientName?.trim() || null;
 
       const newAttendance = attendanceRepo.create({
@@ -407,10 +416,11 @@ export class ContactsController {
       });
       await attendanceRepo.save(newAttendance);
 
-      await importedContactRepo.delete({
-        clientPhone: digitsForDelete,
-        whatsappNumberId: body.whatsappNumberId,
-      });
+      if (importedVariants.length > 0) {
+        await importedContactRepo.delete({ clientPhone: In(importedVariants) });
+      } else {
+        await importedContactRepo.delete({ clientPhone: digitsForDelete });
+      }
 
       const conversation = await this.buildConversationFromAttendance(newAttendance);
       res.json({ success: true, attendanceId: newAttendance.id, isNew: true, conversation });

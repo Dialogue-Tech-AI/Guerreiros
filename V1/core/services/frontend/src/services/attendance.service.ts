@@ -362,6 +362,24 @@ export const attendanceService = {
     return response.data;
   },
 
+  /** Alvo do drag-and-drop do supervisor (painel Entrada). */
+  async supervisorMoveQueue(
+    attendanceId: UUID,
+    target:
+      | { kind: 'nao_atribuidos'; bucket: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao' }
+      | { kind: 'intervencao'; interventionType: 'demanda-telefone-fixo' | 'protese-capilar' | 'outros-assuntos' }
+      | { kind: 'vendedor'; sellerId: UUID; sellerSubdivision: string }
+  ): Promise<{
+    success: boolean;
+    attendanceId: UUID;
+    sellerId: UUID | null;
+    interventionType: string | null;
+    sellerSubdivision: string | null;
+  }> {
+    const response = await api.post(`/attendances/${attendanceId}/supervisor/move-queue`, { target });
+    return response.data;
+  },
+
   /**
    * Get inactivity timer remaining time for an attendance
    */

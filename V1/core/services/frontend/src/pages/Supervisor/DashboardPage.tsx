@@ -13,6 +13,10 @@ import { quoteService, type QuoteRequest } from '../../services/quote.service';
 import { mediaService } from '../../services/media.service';
 import toast from 'react-hot-toast';
 import { contactsService, type Contact, type WhatsAppNumberInfo } from '../../services/contacts.service';
+import { UserRole } from '../../types';
+import { aiConfigService, type DivisionSubdivisionUiEntry } from '../../services/ai-config.service';
+import { DivisionSubdivisionUiModal } from '../../components/SuperAdmin/DivisionSubdivisionUiModal';
+import { getDivisionUiDefaultLabel } from '../../constants/divisionUiDefinitions';
 
 type VehicleBrand = 'FORD' | 'GM' | 'VW' | 'FIAT' | 'IMPORTADOS';
 
@@ -42,6 +46,52 @@ const SERVICE_TO_INTERVENTION: Record<ServiceCategory, string | string[]> = {
   MANUTENCAO: 'demanda-telefone-fixo',
   OUTROS_ASSUNTOS: ['outros-assuntos'],
 };
+
+const SUPERVISOR_DRAG_ATTENDANCE_MIME = 'application/x-supervisor-attendance-id';
+
+/** Chips para soltar conversa nas subdivisões do vendedor selecionado */
+const SUPERVISOR_SELLER_DROP_SUBS: { key: string; shortLabel: string }[] = [
+  { key: 'pedidos-orcamentos', shortLabel: 'Orçamentos' },
+  { key: 'perguntas-pos-orcamento', shortLabel: 'Pós-orç.' },
+  { key: 'confirmacao-pix', shortLabel: 'Pix' },
+  { key: 'tirar-pedido', shortLabel: 'Pedido' },
+  { key: 'informacoes-entrega', shortLabel: 'Entrega' },
+  { key: 'encomendas', shortLabel: 'Encomendas' },
+  { key: 'cliente-pediu-humano', shortLabel: 'Humano' },
+];
+
+function interventionTypeForServiceCategory(cat: ServiceCategory): string {
+  const t = SERVICE_TO_INTERVENTION[cat];
+  return Array.isArray(t) ? t[0] : t;
+}
+
+/** Botão pequeno para personalizar nome/cores da divisão na entrada (qualquer supervisor) */
+function SupervisorDivisionUiBtn({
+  uiKey,
+  canEdit,
+  onOpen,
+}: {
+  uiKey: string;
+  canEdit: boolean;
+  onOpen: (k: string) => void;
+}) {
+  if (!canEdit) return null;
+  return (
+    <button
+      type="button"
+      aria-label="Personalizar nome e cores"
+      className="opacity-45 hover:opacity-100 p-0.5 rounded-md hover:bg-slate-200/60 dark:hover:bg-slate-700/60 flex-shrink-0 z-20 relative"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onOpen(uiKey);
+      }}
+    >
+      <span className="material-icons-round text-[14px] text-slate-500 dark:text-slate-400">palette</span>
+    </button>
+  );
+}
+
 /** Mapeamento interventionType -> serviço (para roteamento em tempo real) */
 const INTERVENTION_TO_SERVICE: Record<string, ServiceCategory> = {
   'protese-capilar': 'PROTESE_CAPILAR',
@@ -208,6 +258,8 @@ export const SupervisorDashboard: React.FC = () => {
   const [supervisorBrands, setSupervisorBrands] = useState<VehicleBrand[]>([]);
   const [selectedServiceCategory, setSelectedServiceCategory] = useState<ServiceCategory | null>(null);
   const [selectedFollowUpNode, setSelectedFollowUpNode] = useState<FollowUpNode | null>(null);
+  /** Destaque visual em zonas de drop ao arrastar conversa na Entrada */
+  const [supervisorDropHoverKey, setSupervisorDropHoverKey] = useState<string | null>(null);
   const [supervisorSellers, setSupervisorSellers] = useState<Seller[]>([]);
   const [updatingSellerAvailabilityIds, setUpdatingSellerAvailabilityIds] = useState<Record<string, boolean>>({});
   const [availabilityNow, setAvailabilityNow] = useState(() => Date.now());
@@ -982,6 +1034,51 @@ export const SupervisorDashboard: React.FC = () => {
     loadSupervisorData();
   }, [user?.id]);
 
+  const [divisionSubdivisionUi, setDivisionSubdivisionUi] = useState<Record<string, DivisionSubdivisionUiEntry>>({});
+  const [divisionUiModalKey, setDivisionUiModalKey] = useState<string | null>(null);
+
+  const canCustomizeDivisionUi =
+    user?.role === UserRole.SUPERVISOR ||
+    user?.role === UserRole.ADMIN_GENERAL ||
+    user?.role === UserRole.SUPER_ADMIN;
+
+  useEffect(() => {
+    aiConfigService.getDivisionSubdivisionUi().then(setDivisionSubdivisionUi).catch(() => {});
+  }, []);
+
+  const divisionUiLabel = useCallback(
+    (key: string, fallback: string) => divisionSubdivisionUi[key]?.label?.trim() || fallback,
+    [divisionSubdivisionUi]
+  );
+
+  const divisionUiNavStyle = useCallback(
+    (key: string, selected: boolean): React.CSSProperties => {
+      if (!selected) return {};
+      const u = divisionSubdivisionUi[key];
+      const base: React.CSSProperties = { ...selectedNavTextStyle };
+      if (u?.color) base.color = u.color;
+      if (u?.accentColor) base.boxShadow = `inset 3px 0 0 ${u.accentColor}`;
+      return base;
+    },
+    [divisionSubdivisionUi, selectedNavTextStyle]
+  );
+
+  const handleDivisionUiModalSave = useCallback(async (uiKey: string, entry: DivisionSubdivisionUiEntry | null) => {
+    try {
+      await aiConfigService.mergeDivisionSubdivisionUi({ [uiKey]: entry });
+      setDivisionSubdivisionUi((prev) => {
+        const next = { ...prev };
+        if (entry === null) delete next[uiKey];
+        else next[uiKey] = entry;
+        return next;
+      });
+      toast.success('Aparência atualizada');
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || err?.message || 'Erro ao guardar');
+      throw err;
+    }
+  }, []);
+
   // Get dynamic header title based on current selection
   const getConversationsHeaderTitle = (): string => {
     if (selectedTodasDemandasSubdivision === '__all__') return 'Todas as Demandas';
@@ -995,36 +1092,43 @@ export const SupervisorDashboard: React.FC = () => {
         'encomendas': 'Encomendas',
         'cliente-pediu-humano': 'Cliente pediu Humano',
       };
-      return subdivLabels[selectedTodasDemandasSubdivision] || selectedTodasDemandasSubdivision;
+      const k = selectedTodasDemandasSubdivision;
+      return divisionUiLabel(k, subdivLabels[k] || k);
     }
 
     // Intervenção humana ativa sem serviço específico (todas as intervenções)
     if (viewingIntervencaoHumana && !selectedServiceCategory) {
-      return 'Intervenção humana';
+      return divisionUiLabel('intervencao-humana', 'Intervenção humana');
     }
 
     // Se categoria de serviço selecionada (inclui intervenção quando filtro ativo)
     if (selectedServiceCategory) {
-      const cat = SERVICE_CATEGORIES.find(c => c.key === selectedServiceCategory);
-      return cat?.label ?? 'Atribuídos';
+      const cat = SERVICE_CATEGORIES.find((c) => c.key === selectedServiceCategory);
+      const fb = cat?.label ?? 'Atribuídos';
+      return divisionUiLabel(`service-${selectedServiceCategory}`, fb);
     }
 
     // Se vendedor selecionado (ex.: ao clicar "Ir para conversa" em orçamento)
     if (selectedSeller) {
-      const seller = supervisorSellers.find(s => s.id === selectedSeller);
+      const seller = supervisorSellers.find((s) => s.id === selectedSeller);
       if (seller) {
-        const cat = SERVICE_CATEGORIES.find(c => getSellersByServiceCategory(c.key).some(s => s.id === seller.id));
-        if (cat) return `${cat.label} → ${seller.name}`;
+        const cat = SERVICE_CATEGORIES.find((c) => getSellersByServiceCategory(c.key).some((s) => s.id === seller.id));
+        if (cat) {
+          const catTitle = divisionUiLabel(`service-${cat.key}`, cat.label);
+          return `${catTitle} → ${seller.name}`;
+        }
         return seller.name;
       }
     }
 
-    if (selectedAttendanceFilter === 'abertos') return 'Abertos';
-    if (selectedAttendanceFilter === 'nao-atribuidos') return 'AI';
-    if (selectedFollowUpNode) return FOLLOW_UP_LABELS[selectedFollowUpNode] ?? 'Follow UP';
+    if (selectedAttendanceFilter === 'abertos') return divisionUiLabel('abertos', 'Abertos');
+    if (selectedAttendanceFilter === 'nao-atribuidos') return divisionUiLabel('nao-atribuidos-ai', 'AI');
+    if (selectedFollowUpNode) {
+      return divisionUiLabel(selectedFollowUpNode, FOLLOW_UP_LABELS[selectedFollowUpNode] ?? 'Follow UP');
+    }
 
     if (selectedFechadosFilter) {
-      return 'Fechados';
+      return divisionUiLabel('fechados', 'Fechados');
     }
 
     // If "Atribuídos" is selected but no seller or category
@@ -1754,6 +1858,8 @@ export const SupervisorDashboard: React.FC = () => {
   const selectedServiceCategoryRef = useRef(selectedServiceCategory);
   const selectedFollowUpNodeRef = useRef(selectedFollowUpNode);
   const supervisorSellersRef = useRef(supervisorSellers);
+  const selectedFechadosFilterRef = useRef(selectedFechadosFilter);
+  const selectedTodasDemandasSubdivisionRef = useRef(selectedTodasDemandasSubdivision);
   /** IDs removidos via fallback (message_received + sellerId). Evita que fetch em flight re-adicione. */
   const recentlyRemovedViaFallbackRef = useRef<Set<string>>(new Set());
   /** IDs roteados nesta sessão — nunca exibir em "Não Atribuídos" (Todos/Triagem/etc.), mesmo que a API devolva. */
@@ -1810,6 +1916,14 @@ export const SupervisorDashboard: React.FC = () => {
   useEffect(() => {
     supervisorSellersRef.current = supervisorSellers;
   }, [supervisorSellers]);
+
+  useEffect(() => {
+    selectedFechadosFilterRef.current = selectedFechadosFilter;
+  }, [selectedFechadosFilter]);
+
+  useEffect(() => {
+    selectedTodasDemandasSubdivisionRef.current = selectedTodasDemandasSubdivision;
+  }, [selectedTodasDemandasSubdivision]);
 
   useEffect(() => {
     const tri = unreadBySubdivision['triagem'] ?? 0;
@@ -1876,6 +1990,172 @@ export const SupervisorDashboard: React.FC = () => {
       console.warn('Erro ao buscar contagens por subdivisão:', e);
     }
   }, [user?.id, user?.role]);
+
+  const allowSupervisorAttendanceDrag = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes(SUPERVISOR_DRAG_ATTENDANCE_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  /** Recarrega a lista de conversas da vista atual após mover fila/subdivisão (mantém filtros). */
+  async function refreshConversationPanelAfterMove() {
+    const af = selectedAttendanceFilterRef.current;
+    const nf = selectedNaoAtribuidosFilterRef.current;
+    const seller = selectedSellerRef.current;
+    const sellerSub = selectedSellerSubdivisionRef.current;
+    const viewingIv = viewingIntervencaoHumanaRef.current;
+    const svc = selectedServiceCategoryRef.current;
+    const fu = selectedFollowUpNodeRef.current;
+    const todasSub = selectedTodasDemandasSubdivisionRef.current;
+    const fechados = selectedFechadosFilterRef.current;
+
+    if (fechados) {
+      await fetchFechadosConversations();
+      return;
+    }
+    if (fu) {
+      await fetchFollowUpConversations(fu);
+      return;
+    }
+    if (af === 'abertos') {
+      await fetchAbertosConversations();
+      return;
+    }
+    if (af === 'nao-atribuidos') {
+      await fetchUnassignedConversations(nf);
+      return;
+    }
+    if (seller) {
+      if (sellerSub === 'pedidos-orcamentos') {
+        try {
+          setIsLoadingQuotes(true);
+          const [pendentes, enviados] = await Promise.all([
+            quoteService.list('pedidos-orcamentos'),
+            quoteService.list('pedidos-orcamentos-enviados'),
+          ]);
+          setQuoteCards(pendentes);
+          setSentQuoteCards(enviados);
+        } catch (e) {
+          console.error(e);
+        } finally {
+          setIsLoadingQuotes(false);
+        }
+        return;
+      }
+      try {
+        setIsLoadingConversations(true);
+        const sellerConversations = await attendanceService.getConversationsBySeller(seller);
+        const readIds = markedAsReadIdsRef.current;
+        const mapped = sellerConversations.map((c) => (readIds.has(String(c.id)) ? { ...c, unread: 0 } : c));
+        const toSet = [...mapped].sort((a, b) => getConversationSortTimestamp(b) - getConversationSortTimestamp(a));
+        setConversations(toSet);
+        const sellerSubs = [
+          'pedidos-orcamentos',
+          'perguntas-pos-orcamento',
+          'confirmacao-pix',
+          'tirar-pedido',
+          'informacoes-entrega',
+          'encomendas',
+          'cliente-pediu-humano',
+        ];
+        const refMap = pendingBySubdivisionAndAttendanceRef.current;
+        sellerSubs.forEach((sub) => delete refMap[`seller-${seller}-${sub}`]);
+        setUnreadBySubdivision((prev) => {
+          const next = { ...prev };
+          sellerSubs.forEach((sub) => {
+            next[`seller-${seller}-${sub}`] = 0;
+          });
+          return next;
+        });
+        for (const c of toSet) {
+          const n = (c as { unread?: number }).unread ?? 0;
+          if (n <= 0) continue;
+          const subKey = `seller-${seller}-${(c as any).sellerSubdivision ?? 'pedidos-orcamentos'}`;
+          incrementSubdivision(subKey, n, String(c.id));
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setIsLoadingConversations(false);
+      }
+      return;
+    }
+    if (todasSub === '__all__') {
+      try {
+        setIsLoadingPendingQuotes(true);
+        const allSubdivisions = [
+          'pedidos-orcamentos',
+          'perguntas-pos-orcamento',
+          'confirmacao-pix',
+          'tirar-pedido',
+          'informacoes-entrega',
+          'encomendas',
+          'cliente-pediu-humano',
+        ];
+        const allQuotes: Array<QuoteRequest & { sellerSubdivision?: string }> = [];
+        for (const subdivision of allSubdivisions) {
+          try {
+            const quotes = await quoteService.list(subdivision);
+            allQuotes.push(...quotes.map((q) => ({ ...q, sellerSubdivision: subdivision })));
+          } catch (err) {
+            console.warn(err);
+          }
+        }
+        allQuotes.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        setPendingQuotes(allQuotes);
+      } finally {
+        setIsLoadingPendingQuotes(false);
+      }
+      return;
+    }
+    if (todasSub && todasSub !== 'pedidos-orcamentos') {
+      try {
+        setIsLoadingPendingQuotes(true);
+        const quotes = await quoteService.list(todasSub);
+        const quotesWithSubdivision = quotes.map((q) => ({ ...q, sellerSubdivision: todasSub }));
+        quotesWithSubdivision.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        setPendingQuotes(quotesWithSubdivision);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setIsLoadingPendingQuotes(false);
+      }
+      return;
+    }
+    if (af === 'tudo' && svc) {
+      await fetchServiceConversations(svc);
+      return;
+    }
+    if (af === 'tudo' && viewingIv && !svc) {
+      await fetchAllInterventionConversations();
+      return;
+    }
+    if (af === 'tudo') {
+      await fetchAttributedConversations();
+    }
+  }
+
+  const runSupervisorMoveDrop = async (
+    e: React.DragEvent,
+    target:
+      | { kind: 'nao_atribuidos'; bucket: 'triagem' | 'encaminhados-ecommerce' | 'encaminhados-balcao' }
+      | { kind: 'intervencao'; interventionType: 'demanda-telefone-fixo' | 'protese-capilar' | 'outros-assuntos' }
+      | { kind: 'vendedor'; sellerId: string; sellerSubdivision: string }
+  ) => {
+    e.preventDefault();
+    setSupervisorDropHoverKey(null);
+    const id = e.dataTransfer.getData(SUPERVISOR_DRAG_ATTENDANCE_MIME);
+    if (!id) return;
+    try {
+      await attendanceService.supervisorMoveQueue(id, target);
+      toast.success('Conversa movida.');
+      await fetchSubdivisionCounts({ bust: true });
+      await refreshConversationPanelAfterMove();
+    } catch (err: any) {
+      const msg = err?.response?.data?.error;
+      toast.error(typeof msg === 'string' ? msg : 'Não foi possível mover a conversa.');
+    }
+  };
 
   useEffect(() => {
     if (!user?.id || user?.role !== 'SUPERVISOR') return;
@@ -3455,7 +3735,8 @@ export const SupervisorDashboard: React.FC = () => {
       const status = conv.unread > 0 ? 'unread' : 'sent';
 
       // Gerar avatar do cliente
-      const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(conv.clientName)}&background=F07000&color=fff`;
+      const avatarSeed = encodeURIComponent(conv.clientName || conv.clientPhone || 'Cliente');
+      const avatar = `https://ui-avatars.com/api/?name=${avatarSeed}&background=F07000&color=fff`;
 
       return {
         id: conv.id,
@@ -4376,6 +4657,13 @@ export const SupervisorDashboard: React.FC = () => {
     selectedAttendanceFilter === 'nao-atribuidos' &&
     selectedNaoAtribuidosFilter === 'todos' &&
     !selectedFechadosFilter;
+  const supervisorConversationDragEnabled =
+    activeSupervisorTab === 'chat' &&
+    !isBulkSelectMode &&
+    !selectedFechadosFilter &&
+    !selectedFollowUpNode &&
+    !isPedidosOrcamentosView &&
+    !selectedTodasDemandasSubdivision;
   const isInterventionNodeActive = (viewingIntervencaoHumana || !!selectedServiceCategory) && !selectedFechadosFilter;
   const isFirstBranchActive = isAiNodeActive || isInterventionNodeActive;
   const firstBranchLineClass = isOpenTreeActive
@@ -4582,6 +4870,16 @@ export const SupervisorDashboard: React.FC = () => {
             <button
               type="button"
               data-division-active={selectedAttendanceFilter === 'abertos' ? true : undefined}
+              onDragOver={(e) => {
+                allowSupervisorAttendanceDrag(e);
+                if (e.dataTransfer.types.includes(SUPERVISOR_DRAG_ATTENDANCE_MIME)) {
+                  setSupervisorDropHoverKey('drop-abertos');
+                }
+              }}
+              onDragLeave={() =>
+                setSupervisorDropHoverKey((k) => (k === 'drop-abertos' ? null : k))
+              }
+              onDrop={(e) => void runSupervisorMoveDrop(e, { kind: 'nao_atribuidos', bucket: 'triagem' })}
               onClick={() => {
                 setSelectedAttendanceFilter('abertos');
                 setViewingIntervencaoHumana(false);
@@ -4596,20 +4894,27 @@ export const SupervisorDashboard: React.FC = () => {
                 setMobileChatLayer('conversations');
               }}
               className={`relative z-10 w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] min-w-0 ${
+                supervisorDropHoverKey === 'drop-abertos' ? 'ring-2 ring-sky-500 ring-inset ' : ''
+              } ${
                 isOpenTreeActive
                   ? 'text-slate-900 dark:text-white font-medium'
                   : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
               }`}
-              style={isOpenTreeActive ? selectedNavTextStyle : {}}
+              style={isOpenTreeActive ? divisionUiNavStyle('abertos', true) : {}}
             >
               <div className="flex items-center gap-2 min-w-0 flex-1">
                 <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">folder_open</span>
-                <div className="flex flex-col items-start min-w-0">
-                  <span className="truncate">Abertos</span>
+                <div className="flex flex-col items-start min-w-0 flex-1">
+                  <span className="truncate">{divisionUiLabel('abertos', 'Abertos')}</span>
                   <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('abertos')} atendimentos abertos</span>
                 </div>
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
+                <SupervisorDivisionUiBtn
+                  uiKey="abertos"
+                  canEdit={canCustomizeDivisionUi}
+                  onOpen={setDivisionUiModalKey}
+                />
                 {totalUnreadAbertos > 0 && (
                   <span className="bg-navy text-white text-[10px] font-semibold px-2 py-0.5 rounded-full min-w-[20px] text-center" style={{ backgroundColor: '#003070' }}>{totalUnreadAbertos > 99 ? '99+' : totalUnreadAbertos}</span>
                 )}
@@ -4619,23 +4924,44 @@ export const SupervisorDashboard: React.FC = () => {
               <button
                 type="button"
                 data-division-active={selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' ? true : undefined}
+                onDragOver={(e) => {
+                  allowSupervisorAttendanceDrag(e);
+                  if (e.dataTransfer.types.includes(SUPERVISOR_DRAG_ATTENDANCE_MIME)) {
+                    setSupervisorDropHoverKey('drop-ai-todos');
+                  }
+                }}
+                onDragLeave={() =>
+                  setSupervisorDropHoverKey((k) => (k === 'drop-ai-todos' ? null : k))
+                }
+                onDrop={(e) => void runSupervisorMoveDrop(e, { kind: 'nao_atribuidos', bucket: 'triagem' })}
                 onClick={handleSelectNaoAtribuidos}
                 className={`relative z-10 w-full flex items-center justify-between space-x-3 px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] min-w-0 ${
+                  supervisorDropHoverKey === 'drop-ai-todos' ? 'ring-2 ring-sky-500 ring-inset ' : ''
+                } ${
                   selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos'
                     ? 'text-slate-900 dark:text-white font-medium'
                     : 'text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                 }`}
-                style={selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos' ? selectedNavTextStyle : {}}
+                style={
+                  selectedAttendanceFilter === 'nao-atribuidos' && selectedNaoAtribuidosFilter === 'todos'
+                    ? divisionUiNavStyle('nao-atribuidos-ai', true)
+                    : {}
+                }
               >
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
                   <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isAiNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>├─</span>
                   <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">smart_toy</span>
-                  <div className="flex flex-col items-start min-w-0">
-                    <span className="truncate">AI</span>
+                  <div className="flex flex-col items-start min-w-0 flex-1">
+                    <span className="truncate">{divisionUiLabel('nao-atribuidos-ai', 'AI')}</span>
                     <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('todos')} Atendimentos</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0">
+                  <SupervisorDivisionUiBtn
+                    uiKey="nao-atribuidos-ai"
+                    canEdit={canCustomizeDivisionUi}
+                    onOpen={setDivisionUiModalKey}
+                  />
                   {getRedBadgeDivision('nao-atribuidos') > 0 && (
                     <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
                   )}
@@ -4650,6 +4976,18 @@ export const SupervisorDashboard: React.FC = () => {
                 <button
                   type="button"
                   data-division-active={viewingIntervencaoHumana && !selectedServiceCategory ? true : undefined}
+                  onDragOver={(e) => {
+                    allowSupervisorAttendanceDrag(e);
+                    if (e.dataTransfer.types.includes(SUPERVISOR_DRAG_ATTENDANCE_MIME)) {
+                      setSupervisorDropHoverKey('drop-intervencao-root');
+                    }
+                  }}
+                  onDragLeave={() =>
+                    setSupervisorDropHoverKey((k) => (k === 'drop-intervencao-root' ? null : k))
+                  }
+                  onDrop={(e) =>
+                    void runSupervisorMoveDrop(e, { kind: 'intervencao', interventionType: 'demanda-telefone-fixo' })
+                  }
                   onClick={() => {
                     setViewingIntervencaoHumana(true);
                     setSelectedServiceCategory(null);
@@ -4663,21 +5001,28 @@ export const SupervisorDashboard: React.FC = () => {
                     setMobileChatLayer('conversations');
                   }}
                   className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
+                    supervisorDropHoverKey === 'drop-intervencao-root' ? 'ring-2 ring-sky-500 ring-inset ' : ''
+                  } ${
                     viewingIntervencaoHumana
                       ? 'text-navy dark:text-white font-medium'
                       : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                   }`}
-                  style={viewingIntervencaoHumana ? selectedNavTextStyle : {}}
+                  style={viewingIntervencaoHumana ? divisionUiNavStyle('intervencao-humana', true) : {}}
                 >
                   <div className="flex items-center gap-1.5 min-w-0 flex-1">
                     <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isInterventionNodeActive ? firstBranchSymbolClass : 'text-slate-300 dark:text-slate-600'}`}>└─</span>
                     <span className="material-icons-round text-lg flex-shrink-0">engineering</span>
-                    <div className="flex flex-col items-start min-w-0">
-                      <span>Intervenção Humana</span>
+                    <div className="flex flex-col items-start min-w-0 flex-1">
+                      <span className="truncate">{divisionUiLabel('intervencao-humana', 'Intervenção Humana')}</span>
                       <span className="text-[10px] text-slate-500 dark:text-slate-400">{getActiveCount('demanda-telefone-fixo') + getActiveCount('protese-capilar') + getActiveCount('outros-assuntos')} Atendimentos</span>
                     </div>
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
+                    <SupervisorDivisionUiBtn
+                      uiKey="intervencao-humana"
+                      canEdit={canCustomizeDivisionUi}
+                      onOpen={setDivisionUiModalKey}
+                    />
                     {getRedBadgeDivision('intervencao-humana') > 0 && (
                       <span className="w-3 h-3 rounded-full bg-red-500 flex-shrink-0" title="Roteamento pendente" />
                     )}
@@ -4701,27 +5046,55 @@ export const SupervisorDashboard: React.FC = () => {
                     const isSelected = selectedServiceCategory === key;
                     const branch = idx < SERVICE_CATEGORIES.length - 1 ? '├─' : '└─';
                     const serviceBranchClass = isSelected ? 'text-sky-600 dark:text-sky-400' : 'text-slate-300 dark:text-slate-600';
+                    const interventionDropType = interventionTypeForServiceCategory(key) as
+                      | 'demanda-telefone-fixo'
+                      | 'protese-capilar'
+                      | 'outros-assuntos';
+                    const serviceDropKey = `drop-svc-${key}`;
 
                     return (
                       <button
                         key={key}
                         type="button"
                         data-division-active={isSelected ? true : undefined}
+                        onDragOver={(e) => {
+                          allowSupervisorAttendanceDrag(e);
+                          if (e.dataTransfer.types.includes(SUPERVISOR_DRAG_ATTENDANCE_MIME)) {
+                            setSupervisorDropHoverKey(serviceDropKey);
+                          }
+                        }}
+                        onDragLeave={() =>
+                          setSupervisorDropHoverKey((k) => (k === serviceDropKey ? null : k))
+                        }
+                        onDrop={(e) =>
+                          void runSupervisorMoveDrop(e, {
+                            kind: 'intervencao',
+                            interventionType: interventionDropType,
+                          })
+                        }
                         onClick={() => handleSelectServiceCategory(key)}
                         className={`relative z-10 w-full flex items-center justify-between px-3 py-2 text-sm text-left rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
+                          supervisorDropHoverKey === serviceDropKey ? 'ring-2 ring-sky-500 ring-inset ' : ''
+                        } ${
                           isSelected
                             ? 'text-slate-900 dark:text-white'
                             : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
                         }`}
+                        style={isSelected ? divisionUiNavStyle(`service-${key}`, true) : {}}
                       >
                         <div className="flex items-center gap-1.5 min-w-0 flex-1">
                           <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${serviceBranchClass}`}>{branch}</span>
                           <span className="material-icons-round text-base flex-shrink-0 text-slate-600 dark:text-slate-400">{icon}</span>
-                          <div className="flex flex-col items-start min-w-0">
-                            <span>{label}</span>
+                          <div className="flex flex-col items-start min-w-0 flex-1">
+                            <span className="truncate">{divisionUiLabel(`service-${key}`, label)}</span>
                             <span className="text-[10px] text-slate-500 dark:text-slate-400">{activeCount} Atendimentos</span>
                           </div>
                         </div>
+                        <SupervisorDivisionUiBtn
+                          uiKey={`service-${key}`}
+                          canEdit={canCustomizeDivisionUi}
+                          onOpen={setDivisionUiModalKey}
+                        />
                       </button>
                     );
                   })}
@@ -4744,17 +5117,22 @@ export const SupervisorDashboard: React.FC = () => {
                 ? 'text-slate-900 dark:text-white font-medium'
                 : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
             }`}
-            style={selectedFollowUpNode === 'follow-up' ? selectedNavTextStyle : {}}
+            style={selectedFollowUpNode === 'follow-up' ? divisionUiNavStyle('follow-up', true) : {}}
           >
             <div className="flex flex-col items-start min-w-0 flex-1">
-              <div className="flex items-center gap-2 w-full">
-                <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">schedule</span>
-                <span className="truncate">Follow up</span>
+              <div className="flex items-center gap-2 w-full min-w-0">
+                <span className="material-icons-round text-base text-slate-500 dark:text-slate-300 flex-shrink-0">schedule</span>
+                <span className="truncate">{divisionUiLabel('follow-up', 'Follow up')}</span>
               </div>
               <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 ml-6">
                 {activeCountBySubdivision['follow-up'] ?? 0} Atendimentos em follow up
               </span>
             </div>
+            <SupervisorDivisionUiBtn
+              uiKey="follow-up"
+              canEdit={canCustomizeDivisionUi}
+              onOpen={setDivisionUiModalKey}
+            />
           </button>
 
           <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${closedTreeLineClass}`}>
@@ -4762,23 +5140,28 @@ export const SupervisorDashboard: React.FC = () => {
                 type="button"
                 data-division-active={selectedFollowUpNode === 'inativo-1h' ? true : undefined}
                 onClick={() => handleSelectFollowUpNode('inativo-1h')}
-                className={`relative z-10 w-full px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
+                className={`relative z-10 w-full flex items-start justify-between gap-2 px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
                   selectedFollowUpNode === 'inativo-1h'
                     ? 'text-slate-900 dark:text-white font-medium'
                     : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
                 }`}
-                style={selectedFollowUpNode === 'inativo-1h' ? selectedNavTextStyle : {}}
+                style={selectedFollowUpNode === 'inativo-1h' ? divisionUiNavStyle('inativo-1h', true) : {}}
               >
-                <div className="flex flex-col items-start min-w-0">
+                <div className="flex flex-col items-start min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isFollowUp1hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
                     <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">hourglass_top</span>
-                    <span className="truncate">Aguardando 1º Follow up</span>
+                    <span className="truncate">{divisionUiLabel('inativo-1h', 'Aguardando 1º Follow up')}</span>
                   </div>
                   <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
                     {activeCountBySubdivision['inativo-1h'] ?? 0} Atendimentos nessa fase
                   </span>
                 </div>
+                <SupervisorDivisionUiBtn
+                  uiKey="inativo-1h"
+                  canEdit={canCustomizeDivisionUi}
+                  onOpen={setDivisionUiModalKey}
+                />
               </button>
 
               <div className={`ml-4 border-l pl-2 space-y-0.5 transition-colors duration-500 ease-in-out ${isFollowUp1hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
@@ -4786,23 +5169,28 @@ export const SupervisorDashboard: React.FC = () => {
                   type="button"
                   data-division-active={selectedFollowUpNode === 'inativo-12h' ? true : undefined}
                   onClick={() => handleSelectFollowUpNode('inativo-12h')}
-                  className={`relative z-10 w-full px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
+                  className={`relative z-10 w-full flex items-start justify-between gap-2 px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
                     selectedFollowUpNode === 'inativo-12h'
                       ? 'text-slate-900 dark:text-white font-medium'
                       : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
                   }`}
-                  style={selectedFollowUpNode === 'inativo-12h' ? selectedNavTextStyle : {}}
+                  style={selectedFollowUpNode === 'inativo-12h' ? divisionUiNavStyle('inativo-12h', true) : {}}
                 >
-                  <div className="flex flex-col items-start min-w-0">
+                  <div className="flex flex-col items-start min-w-0 flex-1">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isFollowUp12hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
                       <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">update</span>
-                      <span className="truncate">Aguardando 2º Follow up</span>
+                      <span className="truncate">{divisionUiLabel('inativo-12h', 'Aguardando 2º Follow up')}</span>
                     </div>
                     <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
                       {activeCountBySubdivision['inativo-12h'] ?? 0} Atendimentos nessa fase
                     </span>
                   </div>
+                  <SupervisorDivisionUiBtn
+                    uiKey="inativo-12h"
+                    canEdit={canCustomizeDivisionUi}
+                    onOpen={setDivisionUiModalKey}
+                  />
                 </button>
 
                 <div className={`ml-4 border-l pl-2 transition-colors duration-500 ease-in-out ${isFollowUp12hPathActive ? 'border-sky-400 dark:border-sky-500' : 'border-slate-200 dark:border-slate-700'}`}>
@@ -4810,23 +5198,28 @@ export const SupervisorDashboard: React.FC = () => {
                     type="button"
                     data-division-active={selectedFollowUpNode === 'inativo-24h' ? true : undefined}
                     onClick={() => handleSelectFollowUpNode('inativo-24h')}
-                    className={`relative z-10 w-full px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
+                    className={`relative z-10 w-full flex items-start justify-between gap-2 px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] text-left ${
                       selectedFollowUpNode === 'inativo-24h'
                         ? 'text-slate-900 dark:text-white font-medium'
                         : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
                     }`}
-                    style={selectedFollowUpNode === 'inativo-24h' ? selectedNavTextStyle : {}}
+                    style={selectedFollowUpNode === 'inativo-24h' ? divisionUiNavStyle('inativo-24h', true) : {}}
                   >
-                    <div className="flex flex-col items-start min-w-0">
+                    <div className="flex flex-col items-start min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span className={`font-mono text-xs transition-colors duration-500 ease-in-out ${isFollowUp24hPathActive ? closedTreeSymbolActive : closedTreeSymbolDefault}`}>└─</span>
                         <span className="material-icons-round text-base text-slate-500 dark:text-slate-300">timer</span>
-                        <span className="truncate">Aguardando</span>
+                        <span className="truncate">{divisionUiLabel('inativo-24h', 'Aguardando')}</span>
                       </div>
                       <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
                         {activeCountBySubdivision['inativo-24h'] ?? 0} Atendimentos nessa fase
                       </span>
                     </div>
+                    <SupervisorDivisionUiBtn
+                      uiKey="inativo-24h"
+                      canEdit={canCustomizeDivisionUi}
+                      onOpen={setDivisionUiModalKey}
+                    />
                   </button>
                 </div>
               </div>
@@ -4855,20 +5248,25 @@ export const SupervisorDashboard: React.FC = () => {
               setPendingQuotes([]);
               setMobileChatLayer('conversations');
             }}
-            className={`relative z-10 w-full flex items-center justify-center px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
+            className={`relative z-10 w-full flex items-center justify-between gap-2 px-3 py-2 text-sm rounded-lg transition-colors duration-500 ease-in-out active:scale-[0.99] ${
               isFechadosActive
                 ? 'text-navy dark:text-white font-medium'
                 : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800'
             }`}
-            style={isFechadosActive ? selectedNavTextStyle : {}}
+            style={isFechadosActive ? divisionUiNavStyle('fechados', true) : {}}
           >
-            <div className="flex items-center gap-2">
+            <div className="flex flex-1 items-center justify-center gap-2 min-w-0">
               <span className="material-icons-round text-lg text-slate-400 flex-shrink-0">archive</span>
-              <div className="flex flex-col items-center">
-                <span>Fechados</span>
+              <div className="flex flex-col items-center min-w-0">
+                <span className="truncate">{divisionUiLabel('fechados', 'Fechados')}</span>
                 <span className="text-[10px] text-slate-500 dark:text-slate-400">{activeCountBySubdivision['fechados'] ?? 0} atendimentos</span>
               </div>
             </div>
+            <SupervisorDivisionUiBtn
+              uiKey="fechados"
+              canEdit={canCustomizeDivisionUi}
+              onOpen={setDivisionUiModalKey}
+            />
           </button>
 
           </div>
@@ -4990,6 +5388,60 @@ export const SupervisorDashboard: React.FC = () => {
             />
           </div>
         </div>
+        {selectedSeller &&
+          activeSupervisorTab === 'chat' &&
+          !isPedidosOrcamentosView &&
+          !selectedTodasDemandasSubdivision &&
+          !selectedFechadosFilter &&
+          !selectedFollowUpNode && (
+            <div className="px-3 pb-2 border-b border-slate-100 dark:border-slate-800">
+              <p className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1.5">
+                Subdivisões —{' '}
+                {supervisorSellers.find((s) => s.id === selectedSeller)?.name ?? 'vendedor selecionado'}
+              </p>
+              <div className="flex gap-1 overflow-x-auto pb-0.5 items-center">
+                {SUPERVISOR_SELLER_DROP_SUBS.map(({ key: subKey, shortLabel }) => {
+                  const chipDropKey = `drop-chip-${subKey}`;
+                  return (
+                    <div key={subKey} className="flex flex-shrink-0 items-center gap-0 rounded-md border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900/40 overflow-hidden">
+                      <button
+                        type="button"
+                        title={`Soltar aqui: ${divisionUiLabel(subKey, shortLabel)}`}
+                        onDragOver={(e) => {
+                          allowSupervisorAttendanceDrag(e);
+                          if (e.dataTransfer.types.includes(SUPERVISOR_DRAG_ATTENDANCE_MIME)) {
+                            setSupervisorDropHoverKey(chipDropKey);
+                          }
+                        }}
+                        onDragLeave={() =>
+                          setSupervisorDropHoverKey((k) => (k === chipDropKey ? null : k))
+                        }
+                        onDrop={(e) =>
+                          void runSupervisorMoveDrop(e, {
+                            kind: 'vendedor',
+                            sellerId: selectedSeller,
+                            sellerSubdivision: subKey,
+                          })
+                        }
+                        className={`px-2 py-1 text-[10px] font-medium transition-colors ${
+                          supervisorDropHoverKey === chipDropKey
+                            ? 'bg-sky-50 dark:bg-sky-900/30 text-sky-900 dark:text-sky-100'
+                            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        {divisionUiLabel(subKey, shortLabel)}
+                      </button>
+                      <SupervisorDivisionUiBtn
+                        uiKey={subKey}
+                        canEdit={canCustomizeDivisionUi}
+                        onOpen={setDivisionUiModalKey}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         <div className="flex-grow overflow-y-auto custom-scrollbar pb-14 md:pb-0 overflow-x-hidden">
           <div key={divisionViewKey} className="animate-slideRollIn min-h-full">
           {isPedidosOrcamentosView ? (
@@ -5177,10 +5629,19 @@ export const SupervisorDashboard: React.FC = () => {
                     const subdiv = (conv as any).sellerSubdivision;
                     if (attr || sid || subdiv) return false; // atribuído → não exibir
                   }
-                  // Filter by search term (client name)
+                  // Filter by search term (nome ou telefone)
                   if (!searchTerm.trim()) return true;
                   const searchLower = searchTerm.toLowerCase().trim();
-                  return conv.name.toLowerCase().includes(searchLower);
+                  const digitsOnly = searchLower.replace(/\D/g, '');
+                  const phoneDigits = (conv.clientPhone || '').replace(/\D/g, '');
+                  const matchesPhone =
+                    !!conv.clientPhone &&
+                    (conv.clientPhone.toLowerCase().includes(searchLower) ||
+                      (digitsOnly.length >= 2 && phoneDigits.includes(digitsOnly)));
+                  const matchesName = (conv.clientName || conv.name || '')
+                    .toLowerCase()
+                    .includes(searchLower);
+                  return matchesPhone || matchesName;
                 });
               
               // Show filtered results or empty state
@@ -5203,7 +5664,16 @@ export const SupervisorDashboard: React.FC = () => {
                 return (
               <div
                 key={conv.id}
-                className={`p-4 border-b border-slate-50 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer transition-colors flex items-start gap-3 ${
+                draggable={supervisorConversationDragEnabled && !isFinished}
+                onDragStart={(e) => {
+                  if (!supervisorConversationDragEnabled || isFinished) return;
+                  e.dataTransfer.setData(SUPERVISOR_DRAG_ATTENDANCE_MIME, String(conv.id));
+                  e.dataTransfer.effectAllowed = 'move';
+                }}
+                onDragEnd={() => setSupervisorDropHoverKey(null)}
+                className={`p-4 border-b border-slate-50 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors flex items-start gap-3 ${
+                  supervisorConversationDragEnabled && !isFinished ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
+                } ${
                   selectedConversation === conv.id ? 'bg-green-50/50 dark:bg-green-900/10 border-l-4 border-green-500' : ''
                 } ${isBulkSelected ? 'ring-2 ring-green-500 ring-inset' : ''}`}
                 onClick={async (e) => {
@@ -5278,9 +5748,27 @@ export const SupervisorDashboard: React.FC = () => {
                 )}
                 <div className="flex items-start justify-between mb-1 flex-1 min-w-0">
                   <div className="flex items-center space-x-3 min-w-0 flex-1">
-                    <img alt={conv.name} className="w-10 h-10 rounded-full flex-shrink-0" src={conv.avatar} />
+                    <img
+                      alt={conv.clientPhone ? formatPhoneNumber(conv.clientPhone) : conv.name}
+                      className="w-10 h-10 rounded-full flex-shrink-0"
+                      src={conv.avatar}
+                    />
                     <div className="min-w-0 flex-1">
-                      <h4 className="text-sm font-bold truncate text-slate-900 dark:text-white">{conv.name}</h4>
+                      {conv.clientPhone ? (
+                        <>
+                          <h4
+                            className="text-sm font-bold truncate text-slate-900 dark:text-white"
+                            title={conv.clientPhone}
+                          >
+                            {formatPhoneNumber(conv.clientPhone)}
+                          </h4>
+                          <p className="text-xs font-medium text-slate-600 dark:text-slate-400 truncate mt-0.5">
+                            {conv.clientName?.trim() || 'Sem nome'}
+                          </p>
+                        </>
+                      ) : (
+                        <h4 className="text-sm font-bold truncate text-slate-900 dark:text-white">{conv.name}</h4>
+                      )}
                       {(() => {
                         // View Follow-up: badge indicando fase (1º, 2º ou Aguardando)
                         if (selectedFollowUpNode && (conv as any).followUpPhase) {
@@ -5629,7 +6117,7 @@ export const SupervisorDashboard: React.FC = () => {
                             <p className="text-sm sm:text-base font-semibold text-slate-900 dark:text-white truncate">
                               {displayName}
                             </p>
-                            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 font-mono mt-0.5 truncate">
+                            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-0.5 truncate">
                               {contact.clientPhone.replace(/^(\d{2})(\d{2})(\d{4,5})(\d{4})$/, '+$1 ($2) $3-$4')}
                             </p>
                             <div className="flex items-center gap-2 mt-1.5 sm:mt-2 flex-wrap">
@@ -6941,14 +7429,20 @@ export const SupervisorDashboard: React.FC = () => {
                   {(selectedConversationData?.clientName || selectedConvName || 'C').charAt(0).toUpperCase()}
                 </div>
               )}
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                {selectedConversationData?.clientName || selectedConvName || 'Cliente'}
-              </h3>
-              {selectedConversationData?.clientPhone && (
-                <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 flex items-center justify-center space-x-1">
-                  <span className="material-icons-round text-sm">phone</span>
-                  <span>{formatPhoneNumber(selectedConversationData.clientPhone)}</span>
-                </p>
+              {selectedConversationData?.clientPhone ? (
+                <>
+                  <p className="text-base font-bold text-slate-900 dark:text-white flex items-center justify-center gap-1.5 flex-wrap">
+                    <span className="material-icons-round text-lg text-slate-500 dark:text-slate-400 flex-shrink-0">phone</span>
+                    <span>{formatPhoneNumber(selectedConversationData.clientPhone)}</span>
+                  </p>
+                  <h3 className="text-sm font-semibold text-slate-600 dark:text-slate-300 mt-1">
+                    {selectedConversationData?.clientName?.trim() || selectedConvName || 'Sem nome'}
+                  </h3>
+                </>
+              ) : (
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  {selectedConversationData?.clientName || selectedConvName || 'Cliente'}
+                </h3>
               )}
             </div>
             <div className="p-6 space-y-4">
@@ -7218,11 +7712,20 @@ export const SupervisorDashboard: React.FC = () => {
               >
                 {(selectedConversationData?.clientName || selectedConvName || 'C').charAt(0).toUpperCase()}
               </div>
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                {selectedConversationData?.clientName || selectedConvName || 'Cliente'}
-              </h3>
-              {selectedConversationData?.clientPhone && (
-                <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">{formatPhoneNumber(selectedConversationData.clientPhone)}</p>
+              {selectedConversationData?.clientPhone ? (
+                <>
+                  <p className="text-base font-bold text-slate-900 dark:text-white flex items-center justify-center gap-1.5 flex-wrap">
+                    <span className="material-icons-round text-base text-slate-500 dark:text-slate-400 flex-shrink-0">phone</span>
+                    <span>{formatPhoneNumber(selectedConversationData.clientPhone)}</span>
+                  </p>
+                  <h3 className="text-sm font-semibold text-slate-600 dark:text-slate-300 mt-1">
+                    {selectedConversationData?.clientName?.trim() || selectedConvName || 'Sem nome'}
+                  </h3>
+                </>
+              ) : (
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  {selectedConversationData?.clientName || selectedConvName || 'Cliente'}
+                </h3>
               )}
             </div>
             <div className="p-5 space-y-4">
@@ -7418,6 +7921,14 @@ export const SupervisorDashboard: React.FC = () => {
           </div>
         </div>
       )}
+      <DivisionSubdivisionUiModal
+        open={divisionUiModalKey !== null}
+        uiKey={divisionUiModalKey}
+        defaultLabel={divisionUiModalKey ? getDivisionUiDefaultLabel(divisionUiModalKey) : ''}
+        initial={divisionUiModalKey ? divisionSubdivisionUi[divisionUiModalKey] : undefined}
+        onClose={() => setDivisionUiModalKey(null)}
+        onSave={handleDivisionUiModalSave}
+      />
     </div>
   );
 };

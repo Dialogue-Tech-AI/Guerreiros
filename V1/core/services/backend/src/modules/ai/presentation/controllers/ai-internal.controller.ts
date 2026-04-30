@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { DeepPartial } from 'typeorm';
 import { AppDataSource } from '../../../../shared/infrastructure/database/typeorm/config/database.config';
 import { Attendance } from '../../../attendance/domain/entities/attendance.entity';
 import { Message } from '../../../message/domain/entities/message.entity';
@@ -16,6 +17,7 @@ import { whatsappManagerService } from '../../../whatsapp/application/services/w
 import { InfrastructureFactory } from '../../../../shared/infrastructure/factories/infrastructure.factory';
 import config from '../../../../config/app.config';
 import { AttendanceSwitchService } from '../../../attendance/application/services/attendance-switch.service';
+import { buildClientPhoneVariants, phonesRepresentSameClient } from '../../../../shared/utils/client-phone-variants';
 
 export class AIInternalController {
   public router: Router;
@@ -208,26 +210,36 @@ export class AIInternalController {
       // Buscar mensagem por whatsappMessageId + whatsappNumberId (robusto para mudanças de estado/atribuição).
       // Antes, a busca dependia do atendimento "ativo" por phoneNumber e falhava após roteamento/fechamento,
       // impedindo mediaUrl/transcrição de serem anexados.
+      const phoneVariants = buildClientPhoneVariants(phoneNumber);
+      const phonesForJoin = phoneVariants.length > 0 ? phoneVariants : [phoneNumber];
+
       let message = await messageRepo
         .createQueryBuilder('m')
         .innerJoin(Attendance, 'a', 'a.id = m.attendance_id')
         .andWhere("m.metadata->>'whatsappMessageId' = :wid", { wid: whatsappMessageId })
-        .andWhere('a.whatsapp_number_id = :wnid', { wnid: whatsappNumberId })
+        .andWhere('a.client_phone IN (:...phones)', { phones: phonesForJoin })
         .orderBy('m.sent_at', 'DESC')
         .getOne();
 
       // Fallback defensivo: em casos legados, tenta buscar pelo atendimento ativo do telefone.
       if (!message) {
-        const fallbackAttendance = await attendanceRepo.findOne({
-          where: [
-            { clientPhone: phoneNumber, whatsappNumberId, operationalState: OperationalState.AGUARDANDO_PRIMEIRA_MSG },
-            { clientPhone: phoneNumber, whatsappNumberId, operationalState: OperationalState.TRIAGEM },
-            { clientPhone: phoneNumber, whatsappNumberId, operationalState: OperationalState.ABERTO },
-            { clientPhone: phoneNumber, whatsappNumberId, operationalState: OperationalState.EM_ATENDIMENTO },
-            { clientPhone: phoneNumber, whatsappNumberId, operationalState: OperationalState.AGUARDANDO_CLIENTE },
-          ],
-          order: { updatedAt: 'DESC' },
-        });
+        const fallbackAttendance =
+          phonesForJoin.length > 0
+            ? await attendanceRepo
+                .createQueryBuilder('a')
+                .where('a.client_phone IN (:...phones)', { phones: phonesForJoin })
+                .andWhere('a.operational_state IN (:...states)', {
+                  states: [
+                    OperationalState.AGUARDANDO_PRIMEIRA_MSG,
+                    OperationalState.TRIAGEM,
+                    OperationalState.ABERTO,
+                    OperationalState.EM_ATENDIMENTO,
+                    OperationalState.AGUARDANDO_CLIENTE,
+                  ],
+                })
+                .orderBy('a.updated_at', 'DESC')
+                .getOne()
+            : null;
 
         if (fallbackAttendance) {
           message = await messageRepo
@@ -593,12 +605,10 @@ export class AIInternalController {
         const att = await attendanceRepo.findOne({
           where: {
             id: decision.attendanceId as UUID,
-            clientPhone,
-            whatsappNumberId: whatsappNumberId as UUID,
             operationalState: OperationalState.FECHADO_OPERACIONAL,
           },
         });
-        if (!att) {
+        if (!att || !phonesRepresentSameClient(att.clientPhone, clientPhone)) {
           res.status(404).json({
             success: false,
             error: 'Attendance not found or not eligible for reopen',
@@ -607,7 +617,12 @@ export class AIInternalController {
         }
         await attendanceRepo.update(
           { id: att.id },
-          { operationalState: OperationalState.EM_ATENDIMENTO, updatedAt: new Date(), lastClientMessageAt: sentAt }
+          {
+            operationalState: OperationalState.EM_ATENDIMENTO,
+            updatedAt: new Date(),
+            lastClientMessageAt: sentAt,
+            whatsappNumberId: whatsappNumberId as UUID,
+          }
         );
         const reloaded = await attendanceRepo.findOne({ where: { id: att.id } });
         attendance = reloaded ?? att;
@@ -624,7 +639,7 @@ export class AIInternalController {
           isFinalized: false,
           isAttributed: true,
           lastClientMessageAt: sentAt,
-        });
+        } as unknown as DeepPartial<Attendance>);
         attendance = await attendanceRepo.save(attendance);
       }
 

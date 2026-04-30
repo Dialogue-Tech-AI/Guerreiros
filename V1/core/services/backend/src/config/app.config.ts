@@ -157,6 +157,7 @@ class AppConfig {
     return {
       level: this.env.LOG_LEVEL,
       format: this.env.LOG_FORMAT,
+      s3TransportEnabled: this.env.S3_LOG_TRANSPORT_ENABLED,
     };
   }
 

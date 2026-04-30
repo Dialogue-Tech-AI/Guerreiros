@@ -18,13 +18,17 @@ import { logger } from './shared/utils/logger';
 import { InfrastructureFactory } from './shared/infrastructure/factories/infrastructure.factory';
 import { S3LogTransport } from './shared/utils/s3-log.transport';
 
-// Add S3/MinIO log transport: MinIO in dev, S3 in prod (when USE_AWS_STORAGE)
-try {
-  const storage = InfrastructureFactory.createStorage();
-  const bucket = config.minio.buckets.logs;
-  logger.add(new S3LogTransport({ storage, bucket }));
-} catch (err) {
-  console.warn('[Logger] Could not add S3/MinIO transport:', err);
+// Add S3/MinIO log transport only when enabled (evita RequestTimeTooSkewed e spam em dev)
+if (config.logging.s3TransportEnabled) {
+  try {
+    const storage = InfrastructureFactory.createStorage();
+    const bucket = config.minio.buckets.logs;
+    logger.add(new S3LogTransport({ storage, bucket }));
+  } catch (err) {
+    console.warn('[Logger] Could not add S3/MinIO transport:', err);
+  }
+} else if (config.app.isDevelopment) {
+  console.info('[Logger] S3/MinIO log transport disabled (local dev). Set S3_LOG_TRANSPORT_ENABLED=true to enable.');
 }
 import { initializeDatabase } from './shared/infrastructure/database/typeorm/config/database.config';
 import { AppModule } from './app.module';

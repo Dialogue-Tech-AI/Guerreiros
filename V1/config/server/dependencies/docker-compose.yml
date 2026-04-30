@@ -57,6 +57,7 @@ services:
       MINIO_USE_SSL: "false"
       MINIO_ACCESS_KEY: minio
       MINIO_SECRET_KEY: minio123
+      S3_LOG_TRANSPORT_ENABLED: "true"
     ports:
       - "3000:3000"
     networks:

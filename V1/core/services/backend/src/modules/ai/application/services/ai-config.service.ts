@@ -955,6 +955,92 @@ Responda em português brasileiro de forma clara e objetiva.`;
     }
   }
 
+  private static readonly DIVISION_UI_HEX = /^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})$/;
+
+  /**
+   * Personalização global de nomes e cores (barra Entrada do supervisor).
+   * Chave = identificador estável (ex.: abertos, triagem, pedidos-orcamentos).
+   */
+  async getDivisionSubdivisionUi(): Promise<Record<string, { label?: string; color?: string; accentColor?: string }>> {
+    const re = AIConfigService.DIVISION_UI_HEX;
+    try {
+      const config = await this.configRepository.findOne({
+        where: { key: 'division_subdivision_ui' },
+      });
+      if (!config?.value) return {};
+      const raw = typeof config.value === 'string' ? JSON.parse(config.value) : config.value;
+      if (!raw || typeof raw !== 'object') return {};
+      const out: Record<string, { label?: string; color?: string; accentColor?: string }> = {};
+      for (const [k, v] of Object.entries(raw)) {
+        if (!v || typeof v !== 'object') continue;
+        const o = v as Record<string, unknown>;
+        const entry: { label?: string; color?: string; accentColor?: string } = {};
+        if (typeof o.label === 'string' && o.label.trim()) entry.label = o.label.trim().slice(0, 80);
+        if (typeof o.color === 'string' && re.test(o.color.trim())) entry.color = o.color.trim();
+        if (typeof o.accentColor === 'string' && re.test(o.accentColor.trim())) entry.accentColor = o.accentColor.trim();
+        if (Object.keys(entry).length) out[k] = entry;
+      }
+      return out;
+    } catch (error: any) {
+      logger.error('Error getting division_subdivision_ui', { error: error.message });
+      return {};
+    }
+  }
+
+  async mergeDivisionSubdivisionUi(
+    patch: Record<string, { label?: string; color?: string; accentColor?: string } | null>
+  ): Promise<{ entries: Record<string, { label?: string; color?: string; accentColor?: string }>; updatedAt: Date }> {
+    const re = AIConfigService.DIVISION_UI_HEX;
+    const existing = await this.getDivisionSubdivisionUi();
+    const next = { ...existing };
+
+    for (const [key, val] of Object.entries(patch)) {
+      if (val === null) {
+        delete next[key];
+        continue;
+      }
+      if (!val || typeof val !== 'object') continue;
+
+      const entry: { label?: string; color?: string; accentColor?: string } = {};
+      if (val.label != null && String(val.label).trim()) entry.label = String(val.label).trim().slice(0, 80);
+      if (val.color != null && String(val.color).trim()) {
+        const c = String(val.color).trim();
+        if (!re.test(c)) {
+          throw new Error(`Cor principal inválida para "${key}" (use #RGB ou #RRGGBB)`);
+        }
+        entry.color = c;
+      }
+      if (val.accentColor != null && String(val.accentColor).trim()) {
+        const c = String(val.accentColor).trim();
+        if (!re.test(c)) {
+          throw new Error(`Cor de destaque inválida para "${key}" (use #RGB ou #RRGGBB)`);
+        }
+        entry.accentColor = c;
+      }
+
+      if (Object.keys(entry).length === 0) delete next[key];
+      else next[key] = entry;
+    }
+
+    const json = JSON.stringify(next);
+    let entity = await this.configRepository.findOne({
+      where: { key: 'division_subdivision_ui' },
+    });
+    if (!entity) {
+      entity = this.configRepository.create({
+        key: 'division_subdivision_ui',
+        value: json,
+        metadata: { updatedAt: new Date().toISOString() },
+      });
+    } else {
+      entity.value = json;
+      entity.metadata = { ...(entity.metadata || {}), updatedAt: new Date().toISOString() };
+    }
+    const saved = await this.configRepository.save(entity);
+    logger.info('division_subdivision_ui merged', { keys: Object.keys(patch) });
+    return { entries: next, updatedAt: saved.updatedAt };
+  }
+
   /**
    * Get follow-up configuration (times and messages for inactive attendances)
    */
@@ -964,37 +1050,41 @@ Responda em português brasileiro de forma clara e objetiva.`;
     closeDelayMinutes: number;
     firstMessage: string;
     secondMessage: string;
+    firstFollowUpEnabled: boolean;
+    secondFollowUpEnabled: boolean;
+    autoCloseAfterFollowUpEnabled: boolean;
   }> {
+    const defaults = {
+      firstDelayMinutes: 60,
+      secondDelayMinutes: 1440,
+      closeDelayMinutes: 2160,
+      firstMessage: 'Oi! Passando para saber se você ainda precisa de ajuda. Se quiser, eu continuo seu atendimento por aqui.',
+      secondMessage: 'Ainda não tivemos seu retorno. Quando quiser retomar, é só responder esta mensagem que seguimos com o atendimento.',
+      firstFollowUpEnabled: true,
+      secondFollowUpEnabled: true,
+      autoCloseAfterFollowUpEnabled: true,
+    };
     try {
       const config = await this.configRepository.findOne({
         where: { key: 'follow_up_config' },
       });
       if (!config || !config.value) {
-        return {
-          firstDelayMinutes: 60,
-          secondDelayMinutes: 1440,
-          closeDelayMinutes: 2160,
-          firstMessage: 'Oi! Passando para saber se você ainda precisa de ajuda. Se quiser, eu continuo seu atendimento por aqui.',
-          secondMessage: 'Ainda não tivemos seu retorno. Quando quiser retomar, é só responder esta mensagem que seguimos com o atendimento.',
-        };
+        return defaults;
       }
       const parsed = typeof config.value === 'string' ? JSON.parse(config.value) : config.value;
       return {
         firstDelayMinutes: Math.max(1, Math.min(1440, parsed.firstDelayMinutes ?? 60)),
         secondDelayMinutes: Math.max(1, Math.min(1440 * 7, parsed.secondDelayMinutes ?? 1440)),
         closeDelayMinutes: Math.max(60, Math.min(1440 * 30, parsed.closeDelayMinutes ?? 2160)),
-        firstMessage: typeof parsed.firstMessage === 'string' ? parsed.firstMessage : 'Oi! Passando para saber se você ainda precisa de ajuda. Se quiser, eu continuo seu atendimento por aqui.',
-        secondMessage: typeof parsed.secondMessage === 'string' ? parsed.secondMessage : 'Ainda não tivemos seu retorno. Quando quiser retomar, é só responder esta mensagem que seguimos com o atendimento.',
+        firstMessage: typeof parsed.firstMessage === 'string' ? parsed.firstMessage : defaults.firstMessage,
+        secondMessage: typeof parsed.secondMessage === 'string' ? parsed.secondMessage : defaults.secondMessage,
+        firstFollowUpEnabled: parsed.firstFollowUpEnabled !== false,
+        secondFollowUpEnabled: parsed.secondFollowUpEnabled !== false,
+        autoCloseAfterFollowUpEnabled: parsed.autoCloseAfterFollowUpEnabled !== false,
       };
     } catch (error: any) {
       logger.error('Error getting follow-up config', { error: error.message });
-      return {
-        firstDelayMinutes: 60,
-        secondDelayMinutes: 1440,
-        closeDelayMinutes: 2160,
-        firstMessage: 'Oi! Passando para saber se você ainda precisa de ajuda. Se quiser, eu continuo seu atendimento por aqui.',
-        secondMessage: 'Ainda não tivemos seu retorno. Quando quiser retomar, é só responder esta mensagem que seguimos com o atendimento.',
-      };
+      return defaults;
     }
   }
 
@@ -1007,27 +1097,49 @@ Responda em português brasileiro de forma clara e objetiva.`;
     closeDelayMinutes: number;
     firstMessage: string;
     secondMessage: string;
+    firstFollowUpEnabled?: boolean;
+    secondFollowUpEnabled?: boolean;
+    autoCloseAfterFollowUpEnabled?: boolean;
   }): Promise<{ success: boolean; updatedAt: Date }> {
     try {
-      if (config.firstDelayMinutes < 1 || config.firstDelayMinutes > 1440) {
+      let firstFollowUpEnabled = config.firstFollowUpEnabled !== false;
+      let secondFollowUpEnabled = config.secondFollowUpEnabled !== false;
+      if (!firstFollowUpEnabled) {
+        secondFollowUpEnabled = false;
+      }
+      const autoCloseAfterFollowUpEnabled = config.autoCloseAfterFollowUpEnabled !== false;
+
+      if (firstFollowUpEnabled && (config.firstDelayMinutes < 1 || config.firstDelayMinutes > 1440)) {
         throw new Error('Tempo até 1ª mensagem deve estar entre 1 e 1440 minutos (24h)');
       }
-      if (config.secondDelayMinutes < 1 || config.secondDelayMinutes > 1440 * 7) {
+      if (secondFollowUpEnabled && (config.secondDelayMinutes < 1 || config.secondDelayMinutes > 1440 * 7)) {
         throw new Error('Tempo até 2ª mensagem deve estar entre 1 e 10080 minutos (7 dias)');
       }
       if (config.closeDelayMinutes < 60 || config.closeDelayMinutes > 1440 * 30) {
         throw new Error('Tempo até fechamento deve estar entre 60 e 43200 minutos (30 dias)');
       }
-      if (!config.firstMessage?.trim()) {
-        throw new Error('Mensagem do 1º follow-up é obrigatória');
+      if (firstFollowUpEnabled && !config.firstMessage?.trim()) {
+        throw new Error('Mensagem do 1º follow-up é obrigatória quando o 1º follow-up está ativo');
       }
-      if (!config.secondMessage?.trim()) {
-        throw new Error('Mensagem do 2º follow-up é obrigatória');
+      if (secondFollowUpEnabled && !config.secondMessage?.trim()) {
+        throw new Error('Mensagem do 2º follow-up é obrigatória quando o 2º follow-up está ativo');
       }
+
+      const payload = {
+        firstDelayMinutes: config.firstDelayMinutes,
+        secondDelayMinutes: config.secondDelayMinutes,
+        closeDelayMinutes: config.closeDelayMinutes,
+        firstMessage: config.firstMessage ?? '',
+        secondMessage: config.secondMessage ?? '',
+        firstFollowUpEnabled,
+        secondFollowUpEnabled,
+        autoCloseAfterFollowUpEnabled,
+      };
+
       let entity = await this.configRepository.findOne({
         where: { key: 'follow_up_config' },
       });
-      const value = JSON.stringify(config);
+      const value = JSON.stringify(payload);
       if (!entity) {
         entity = this.configRepository.create({
           key: 'follow_up_config',

@@ -10,16 +10,25 @@ import { logger } from '../../../../shared/utils/logger';
 import { socketService } from '../../../../shared/infrastructure/socket/socket.service';
 import { InfrastructureFactory } from '../../../../shared/infrastructure/factories/infrastructure.factory';
 import { aiConfigService } from '../../../ai/application/services/ai-config.service';
-import { Not, In, LessThan, MoreThanOrEqual } from 'typeorm';
+import { Not, In, LessThan, MoreThanOrEqual, DeepPartial } from 'typeorm';
 import { MediaService } from './media.service';
 import { messageBufferService } from './message-buffer.service';
 import { mediaProcessorService } from './media-processor.service';
 import { invalidateSubdivisionCountsCache } from '../../../attendance/presentation/controllers/attendance.controller';
+import { buildClientPhoneVariants } from '../../../../shared/utils/client-phone-variants';
 
 const FC_NAME_FECHA_BALCAO = 'fechaatendimentobalcao';
 const DEFAULT_TEMPO_FECHAMENTO_BALCAO_MIN = 30;
 const AUTO_REOPEN_HOURS = 8;
 const AUTO_REOPEN_TIMEOUT_MINUTES = AUTO_REOPEN_HOURS * 60;
+
+const ACTIVE_CLIENT_OPERATIONAL_STATES: OperationalState[] = [
+  OperationalState.AGUARDANDO_PRIMEIRA_MSG,
+  OperationalState.TRIAGEM,
+  OperationalState.ABERTO,
+  OperationalState.EM_ATENDIMENTO,
+  OperationalState.AGUARDANDO_CLIENTE,
+];
 
 /**
  * Message Processor Service
@@ -53,6 +62,8 @@ export class MessageProcessorService {
         fromMe: isFromMe,
       });
 
+      const phoneVariants = buildClientPhoneVariants(whatsappMessage.phoneNumber);
+
       // Mensagem do dono enviada do celular (fora da plataforma)
       if (isFromMe) {
         await this.processOwnerMessageFromPhone(whatsappMessage);
@@ -64,36 +75,15 @@ export class MessageProcessorService {
       // Por enquanto, buscamos attendances em TRIAGEM ou ABERTO (não finalizados operacionalmente)
       // IMPORTANTE: NUNCA reutilizar atendimentos FECHADOS - sempre criar novo ou usar decide_attendance
       const attendanceRepo = AppDataSource.getRepository(Attendance);
-      let attendance = await attendanceRepo.findOne({
-        where: [
-          {
-            clientPhone: whatsappMessage.phoneNumber,
-            whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
-            operationalState: OperationalState.AGUARDANDO_PRIMEIRA_MSG,
-          },
-          {
-            clientPhone: whatsappMessage.phoneNumber,
-            whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
-            operationalState: OperationalState.TRIAGEM,
-          },
-          {
-            clientPhone: whatsappMessage.phoneNumber,
-            whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
-            operationalState: OperationalState.ABERTO,
-          },
-          {
-            clientPhone: whatsappMessage.phoneNumber,
-            whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
-            operationalState: OperationalState.EM_ATENDIMENTO,
-          },
-          {
-            clientPhone: whatsappMessage.phoneNumber,
-            whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
-            operationalState: OperationalState.AGUARDANDO_CLIENTE,
-          },
-        ],
-        order: { updatedAt: 'DESC' }, // Get most recent
-      });
+      let attendance =
+        phoneVariants.length > 0
+          ? await attendanceRepo
+              .createQueryBuilder('a')
+              .where('a.client_phone IN (:...phones)', { phones: phoneVariants })
+              .andWhere('a.operational_state IN (:...states)', { states: ACTIVE_CLIENT_OPERATIONAL_STATES })
+              .orderBy('a.updated_at', 'DESC')
+              .getOne()
+          : null;
 
       // Verificação de segurança: se encontramos um atendimento, garantir que não está fechado
       if (attendance && attendance.operationalState === OperationalState.FECHADO_OPERACIONAL) {
@@ -150,8 +140,7 @@ export class MessageProcessorService {
         // Fechar outros atendimentos ativos antes de criar/reabrir
         const otherActiveAttendances = await attendanceRepo.find({
           where: {
-            clientPhone,
-            whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
+            clientPhone: In(phoneVariants),
             operationalState: Not(OperationalState.FECHADO_OPERACIONAL),
           },
         });
@@ -178,8 +167,7 @@ export class MessageProcessorService {
 
         const recentlyClosedAttendance = await attendanceRepo.findOne({
           where: {
-            clientPhone,
-            whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
+            clientPhone: In(phoneVariants),
             operationalState: OperationalState.FECHADO_OPERACIONAL,
             finalizedAt: MoreThanOrEqual(cutoffTime), // Fechado após o cutoffTime (dentro do período)
           },
@@ -261,6 +249,7 @@ export class MessageProcessorService {
               lastClientMessageAt: now,
               balcaoClosingAt: null,
               ecommerceClosingAt: null,
+              whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
               handledBy: restoredHandledBy, // CORREÇÃO: Sempre preservar/definir handledBy
               aiContext: {
                 ...(aiContext ?? {}),
@@ -366,7 +355,7 @@ export class MessageProcessorService {
             isFinalized: false,
             isAttributed: true,
             lastClientMessageAt: whatsappMessage.timestamp,
-          });
+          } as unknown as DeepPartial<Attendance>);
           attendance = await attendanceRepo.save(attendance);
           isNewAttendance = true;
           logger.info('Created new attendance', { attendanceId: attendance.id, clientPhone });
@@ -404,8 +393,7 @@ export class MessageProcessorService {
           // Fechar outros atendimentos ativos antes de criar novo
           const otherActiveAttendances = await attendanceRepo.find({
             where: {
-              clientPhone,
-              whatsappNumberId,
+              clientPhone: In(phoneVariants),
               operationalState: Not(OperationalState.FECHADO_OPERACIONAL),
             },
           });
@@ -438,7 +426,7 @@ export class MessageProcessorService {
             isFinalized: false,
             isAttributed: true,
             lastClientMessageAt: whatsappMessage.timestamp,
-          });
+          } as unknown as DeepPartial<Attendance>);
           attendance = await attendanceRepo.save(attendance);
           isNewAttendance = true;
           logger.info('Created new attendance (previous was closed)', { attendanceId: attendance.id, clientPhone });
@@ -448,8 +436,7 @@ export class MessageProcessorService {
           // Se encontramos um atendimento existente ATIVO, fechar outros atendimentos ativos (exceto o atual)
           const otherActiveAttendances = await attendanceRepo.find({
             where: {
-              clientPhone: whatsappMessage.phoneNumber,
-              whatsappNumberId: whatsappMessage.whatsappNumberId as UUID,
+              clientPhone: In(phoneVariants),
               operationalState: Not(OperationalState.FECHADO_OPERACIONAL),
               id: Not(attendance.id),
             },
@@ -550,6 +537,18 @@ export class MessageProcessorService {
         }
       }
 
+      if (attendance) {
+        const incomingWnid = whatsappMessage.whatsappNumberId as UUID;
+        if (attendance.whatsappNumberId !== incomingWnid) {
+          await attendanceRepo.update({ id: attendance.id }, { whatsappNumberId: incomingWnid });
+          attendance.whatsappNumberId = incomingWnid;
+          logger.info('Attendance migrated to current WhatsApp line', {
+            attendanceId: attendance.id,
+            incomingWhatsappNumberId: incomingWnid,
+          });
+        }
+      }
+
       // CORREÇÃO: Buscar resumo do último atendimento fechado quando:
       // 1. Atendimento é novo (isNewAttendance = true)
       // 2. Atendimento foi reaberto (isNewAttendance = false mas foi reaberto recentemente)
@@ -558,14 +557,17 @@ export class MessageProcessorService {
       
       // Se é novo atendimento, buscar resumo do último fechado
       if (isNewAttendance) {
-        const lastClosed = await attendanceRepo.findOne({
-          where: {
-            clientPhone: attendance.clientPhone,
-            whatsappNumberId: attendance.whatsappNumberId,
-            operationalState: OperationalState.FECHADO_OPERACIONAL,
-          },
-          order: { finalizedAt: 'DESC' },
-        });
+        const summaryPhones = buildClientPhoneVariants(attendance.clientPhone);
+        const lastClosed =
+          summaryPhones.length > 0
+            ? await attendanceRepo.findOne({
+                where: {
+                  clientPhone: In(summaryPhones),
+                  operationalState: OperationalState.FECHADO_OPERACIONAL,
+                },
+                order: { finalizedAt: 'DESC' },
+              })
+            : null;
         const ac = lastClosed?.aiContext as Record<string, unknown> | undefined;
         lastAttendanceSummary = (ac?.conversationSummary as string) || undefined;
       } else {
@@ -576,15 +578,18 @@ export class MessageProcessorService {
         
         // Se não encontrou no próprio atendimento, buscar do último fechado (fallback)
         if (!lastAttendanceSummary) {
-          const lastClosed = await attendanceRepo.findOne({
-            where: {
-              clientPhone: attendance.clientPhone,
-              whatsappNumberId: attendance.whatsappNumberId,
-              operationalState: OperationalState.FECHADO_OPERACIONAL,
-              id: Not(attendance.id), // Excluir o próprio atendimento reaberto
-            },
-            order: { finalizedAt: 'DESC' },
-          });
+          const summaryPhones = buildClientPhoneVariants(attendance.clientPhone);
+          const lastClosed =
+            summaryPhones.length > 0
+              ? await attendanceRepo.findOne({
+                  where: {
+                    clientPhone: In(summaryPhones),
+                    operationalState: OperationalState.FECHADO_OPERACIONAL,
+                    id: Not(attendance.id), // Excluir o próprio atendimento reaberto
+                  },
+                  order: { finalizedAt: 'DESC' },
+                })
+              : null;
           const lastAc = lastClosed?.aiContext as Record<string, unknown> | undefined;
           lastAttendanceSummary = (lastAc?.conversationSummary as string) || undefined;
         }
@@ -1006,17 +1011,17 @@ export class MessageProcessorService {
     const attendanceRepo = AppDataSource.getRepository(Attendance);
     const messageRepo = AppDataSource.getRepository(Message);
 
-    const attendance = await attendanceRepo.findOne({
-      where: [
-        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.AGUARDANDO_PRIMEIRA_MSG },
-        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.TRIAGEM },
-        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.ABERTO },
-        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.EM_ATENDIMENTO },
-        { clientPhone: whatsappMessage.phoneNumber, whatsappNumberId: whatsappMessage.whatsappNumberId as UUID, operationalState: OperationalState.AGUARDANDO_CLIENTE },
-      ],
-      order: { updatedAt: 'DESC' },
-      relations: ['seller'],
-    });
+    const ownerPhoneVariants = buildClientPhoneVariants(whatsappMessage.phoneNumber);
+    const attendance =
+      ownerPhoneVariants.length > 0
+        ? await attendanceRepo
+            .createQueryBuilder('a')
+            .where('a.client_phone IN (:...phones)', { phones: ownerPhoneVariants })
+            .andWhere('a.operational_state IN (:...states)', { states: ACTIVE_CLIENT_OPERATIONAL_STATES })
+            .orderBy('a.updated_at', 'DESC')
+            .leftJoinAndSelect('a.seller', 'seller')
+            .getOne()
+        : null;
 
     if (!attendance) {
       logger.info('Owner message from phone: no active attendance found, skipping', {
@@ -1024,6 +1029,11 @@ export class MessageProcessorService {
         messageId: whatsappMessage.id,
       });
       return;
+    }
+
+    const incomingOwnerLine = whatsappMessage.whatsappNumberId as UUID;
+    if (attendance.whatsappNumberId !== incomingOwnerLine) {
+      attendance.whatsappNumberId = incomingOwnerLine;
     }
 
     const messageTimestamp = whatsappMessage.timestamp instanceof Date ? whatsappMessage.timestamp : new Date(whatsappMessage.timestamp);

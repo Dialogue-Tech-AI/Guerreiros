@@ -5,6 +5,7 @@ import { logger } from '../../utils/logger';
 
 export class MinIOStorage implements IStorage {
   private client: Minio.Client;
+  private static loggedSkewWarning = false;
 
   constructor() {
     this.client = new Minio.Client({
@@ -15,7 +16,15 @@ export class MinIOStorage implements IStorage {
       secretKey: config.minio.secretKey,
     });
 
-    this.initializeBuckets();
+    void this.initializeBuckets();
+  }
+
+  private static isRequestTimeTooSkewed(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: string }).code === 'RequestTimeTooSkewed'
+    );
   }
 
   private async initializeBuckets(): Promise<void> {
@@ -24,8 +33,19 @@ export class MinIOStorage implements IStorage {
       await this.ensureBucket(config.minio.buckets.attachments);
       await this.ensureBucket(config.minio.buckets.media);
       await this.ensureBucket(config.minio.buckets.logs);
-      logger.info('MinIO storage initialized successfully');
+      if (!MinIOStorage.loggedSkewWarning) {
+        logger.info('MinIO storage initialized successfully');
+      }
     } catch (error) {
+      if (MinIOStorage.isRequestTimeTooSkewed(error) && config.app.isDevelopment) {
+        if (!MinIOStorage.loggedSkewWarning) {
+          MinIOStorage.loggedSkewWarning = true;
+          logger.warn(
+            'MinIO: buckets não verificados — RequestTimeTooSkewed (relógio Windows vs Docker). Sincronize a hora; buckets criados pelo compose podem estar disponíveis após corrigir.'
+          );
+        }
+        return;
+      }
       logger.error('Failed to initialize MinIO buckets:', error);
     }
   }
@@ -129,6 +149,15 @@ export class MinIOStorage implements IStorage {
         logger.info(`Bucket ${bucket} created successfully`);
       }
     } catch (error) {
+      if (MinIOStorage.isRequestTimeTooSkewed(error) && config.app.isDevelopment) {
+        if (!MinIOStorage.loggedSkewWarning) {
+          MinIOStorage.loggedSkewWarning = true;
+          logger.warn(
+            'MinIO: RequestTimeTooSkewed — relógio do PC e do servidor MinIO estão dessincronizados. Ative hora automática no Windows e `w32tm /resync` (Admin). Buckets do Docker podem existir; uploads falham até corrigir.'
+          );
+        }
+        return;
+      }
       logger.error(`Error ensuring bucket ${bucket}:`, error);
       throw error;
     }
